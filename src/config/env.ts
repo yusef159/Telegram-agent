@@ -1,0 +1,26 @@
+import dotenv from "dotenv";
+import { z } from "zod";
+
+dotenv.config();
+
+const envSchema = z.object({
+  TELEGRAM_BOT_TOKEN: z.string().min(1, "TELEGRAM_BOT_TOKEN is required"),
+  AI_API_KEY: z.string().min(1, "AI_API_KEY is required"),
+  OPENAI_MODEL: z.string().min(1).default("gpt-4o-mini"),
+  DATABASE_PATH: z.string().min(1).default("./data/bot.sqlite"),
+  APP_TIMEZONE: z.string().min(1).default("Asia/Jerusalem"),
+  SCHEDULER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(20),
+  MEMORY_MESSAGE_LIMIT: z.coerce.number().int().positive().default(10),
+  OPENAI_TIMEOUT_MS: z.coerce.number().int().positive().default(15000)
+});
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  const errors = parsed.error.issues
+    .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+    .join("; ");
+  throw new Error(`Invalid environment variables: ${errors}`);
+}
+
+export const env = parsed.data;

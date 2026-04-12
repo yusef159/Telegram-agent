@@ -1,0 +1,20 @@
+services:
+  telegram-ai-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/arm64
+    platform: linux/arm64
+    container_name: telegram-ai-reminder-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_PATH: /app/data/bot.sqlite
+      APP_TIMEZONE: Asia/Jerusalem
+    volumes:
+      - bot_data:/app/data
+
+volumes:
+  bot_data:

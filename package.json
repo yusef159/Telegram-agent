@@ -1,0 +1,39 @@
+{
+  "name": "telgram-agent",
+  "version": "1.0.0",
+  "description": "Telegram AI reminder bot with SQLite scheduling",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "reminder",
+    "openai",
+    "typescript"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^17.4.1",
+    "luxon": "^3.7.2",
+    "node-schedule": "^2.1.1",
+    "openai": "^6.34.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1",
+    "telegraf": "^4.16.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/luxon": "^3.7.1",
+    "@types/node": "^25.6.0",
+    "@types/node-schedule": "^2.1.8",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
