@@ -68,4 +68,10 @@ export async function runMigrations(db: AppDatabase): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_user_memory_lookup
     ON user_memory(chat_id, user_id, score, updated_at);
   `);
+
+  const reminderColumns = (await db.all(`PRAGMA table_info(reminders);`)) as Array<{ name: string }>;
+  const hasRecurrence = reminderColumns.some((column: { name: string }) => column.name === "recurrence_json");
+  if (!hasRecurrence) {
+    await db.exec(`ALTER TABLE reminders ADD COLUMN recurrence_json TEXT NULL;`);
+  }
 }

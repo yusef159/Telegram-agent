@@ -83,6 +83,10 @@ export class TasksRepository {
     return row ? mapTaskRow(row) : null;
   }
 
+  async getExistingPendingTask(chatId: number, taskText: string): Promise<TaskRecord | null> {
+    return this.getLatestPendingTaskByText(chatId, taskText);
+  }
+
   async cancelPendingTask(taskId: number): Promise<void> {
     const nowIso = new Date().toISOString();
     await this.db.run(

@@ -3,7 +3,14 @@ import { toFile } from "openai/uploads";
 import { z } from "zod";
 
 import { env } from "../config/env";
-import type { ChatMessage, ParsedReminderIntent, ReminderRecord, TaskRecord } from "../types/domain";
+import type {
+  ChatMessage,
+  MessageActionPlan,
+  MessageActionPlanParseResult,
+  ParsedReminderIntent,
+  ReminderRecord,
+  TaskRecord
+} from "../types/domain";
 
 const reminderSchema = z.object({
   isReminder: z.boolean().optional().default(false),
@@ -51,6 +58,111 @@ const reminderListFilterSchema = z.object({
   keyword: z.string().nullable().optional()
 });
 
+const PLANNER_MAX_ACTIONS = 10;
+
+const plannedWeeklyRecurrenceSchema = z
+  .object({
+    kind: z.literal("weekly"),
+    weekdays: z.array(z.number().int().min(1).max(7)).min(1),
+    hour: z.number().int().min(0).max(23),
+    minute: z.number().int().min(0).max(59)
+  })
+  .strict();
+
+const plannedCreateReminderActionSchema = z
+  .object({
+    type: z.literal("create_reminder"),
+    message: z.string().min(1),
+    dueAtIso: z.string().min(1),
+    recurrence: plannedWeeklyRecurrenceSchema.nullable().optional()
+  })
+  .strict();
+
+const plannedCreateTaskActionSchema = z
+  .object({
+    type: z.literal("create_task"),
+    task: z.string().min(1)
+  })
+  .strict();
+
+const plannedAnswerUserActionSchema = z
+  .object({
+    type: z.literal("answer_user"),
+    text: z.string().min(1)
+  })
+  .strict();
+
+const plannedListRemindersActionSchema = z
+  .object({
+    type: z.literal("list_reminders"),
+    filter: z.string().nullable().optional()
+  })
+  .strict();
+
+const plannedListTasksActionSchema = z
+  .object({
+    type: z.literal("list_tasks")
+  })
+  .strict();
+
+const plannedDeleteReminderActionSchema = z
+  .object({
+    type: z.literal("delete_reminder"),
+    mode: z.enum(["single", "ids", "count", "all"]),
+    ids: z.array(z.number().int().positive()).optional(),
+    count: z.number().int().positive().optional(),
+    queryText: z.string().nullable().optional(),
+    listPosition: z.number().int().positive().nullable().optional()
+  })
+  .strict();
+
+const plannedDeleteTaskActionSchema = z
+  .object({
+    type: z.literal("delete_task"),
+    mode: z.enum(["single", "ids", "count", "all"]),
+    ids: z.array(z.number().int().positive()).optional(),
+    count: z.number().int().positive().optional(),
+    queryText: z.string().nullable().optional(),
+    listPosition: z.number().int().positive().nullable().optional()
+  })
+  .strict();
+
+const plannedAdjustReminderActionSchema = z
+  .object({
+    type: z.literal("adjust_reminder"),
+    id: z.number().int().positive().nullable().optional(),
+    instructions: z.string().min(1)
+  })
+  .strict();
+
+const plannedAskClarificationActionSchema = z
+  .object({
+    type: z.literal("ask_clarification"),
+    question: z.string().min(1)
+  })
+  .strict();
+
+const plannedActionSchema = z.discriminatedUnion("type", [
+  plannedCreateReminderActionSchema,
+  plannedCreateTaskActionSchema,
+  plannedAnswerUserActionSchema,
+  plannedListRemindersActionSchema,
+  plannedListTasksActionSchema,
+  plannedDeleteReminderActionSchema,
+  plannedDeleteTaskActionSchema,
+  plannedAdjustReminderActionSchema,
+  plannedAskClarificationActionSchema
+]);
+
+const messageActionPlanSchema = z
+  .object({
+    version: z.string().default("1.0"),
+    actions: z.array(plannedActionSchema).max(PLANNER_MAX_ACTIONS),
+    needsClarification: z.boolean().optional().default(false),
+    clarificationQuestion: z.string().nullable().optional()
+  })
+  .strict();
+
 export class OpenAiClient {
   private readonly client: OpenAI;
 
@@ -76,10 +188,11 @@ export class OpenAiClient {
           {
             role: "system",
             content: [
-              "You are a concise and helpful Telegram assistant.",
+              "You are a concise, warm, and helpful Telegram assistant.",
               "This bot can set reminders for users.",
               "Use known user profile facts when relevant.",
-              "Keep responses brief and practical.",
+              "Keep responses brief, practical, and friendly.",
+              "Use simple, positive wording and a supportive tone.",
               memorySection
             ].join("\n")
           },
@@ -179,7 +292,8 @@ export class OpenAiClient {
               `Current time in timezone: ${params.nowIsoInTimezone}.`,
               "If user is not asking to set a reminder, set isReminder=false.",
               "For reminder requests, dueAtIso must be ISO-8601 with timezone offset.",
-              "If time is unclear, set isReminder=true, dueAtIso=null and include reason."
+              "If time is unclear, set isReminder=true, dueAtIso=null and include reason.",
+              "Phrases like every/weekly plus weekdays still count as a reminder request (isReminder=true)."
             ].join(" ")
           },
           {
@@ -247,7 +361,11 @@ export class OpenAiClient {
               `Timezone is always ${params.timezone}.`,
               `Current time in timezone: ${params.nowIsoInTimezone}.`,
               "If no reminders exist, return reminders as an empty array.",
-              "dueAtIso must be ISO-8601 with timezone offset when available."
+              "dueAtIso must be ISO-8601 with timezone offset when available.",
+              "If user asks for several reminders in one message, return one item per reminder.",
+              "If user asks for the same reminder on multiple weekdays/dates, return one item per weekday/date mention.",
+              "If weekday reminders do not include an explicit time, use 09:00 in the given timezone.",
+              "If user asks for a WEEKLY REPEATING reminder (every/weekly + weekday(s)), return ONE item with dueAtIso set to the next occurrence and the full task text; do not split into separate one-off reminders for that case."
             ].join(" ")
           },
           { role: "user", content: params.userMessage }
@@ -383,7 +501,8 @@ export class OpenAiClient {
       id: item.id,
       message: item.message,
       dueAtUtc: item.dueAtUtc,
-      status: item.status
+      status: item.status,
+      recurringWeekly: Boolean(item.recurrenceJson?.trim())
     }));
 
     const normalizedTasks = params.tasks.map((item) => ({
@@ -486,6 +605,78 @@ export class OpenAiClient {
     };
   }
 
+  async planMessageActions(params: {
+    userMessage: string;
+    nowIsoInTimezone: string;
+    timezone: string;
+  }): Promise<MessageActionPlanParseResult> {
+    const completion = await this.runWithTimeout(() =>
+      this.client.chat.completions.create({
+        model: env.OPENAI_MODEL,
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Convert the user message into an executable JSON plan.",
+              "Return JSON only with keys: version, actions, needsClarification, clarificationQuestion.",
+              `actions count must be <= ${PLANNER_MAX_ACTIONS}.`,
+              "Action key must be 'type'.",
+              "Allowed types: create_reminder, create_task, answer_user, list_reminders, list_tasks, delete_reminder, delete_task, adjust_reminder, ask_clarification.",
+              "Chat/general questions => one answer_user action.",
+              "create_reminder needs message + dueAtIso (ISO with offset); weekly recurrence: {kind:'weekly', weekdays:[1..7], hour, minute}.",
+              "delete_* uses mode single|ids|count|all; use queryText for text match, listPosition for numbered list.",
+              "If ambiguous, set needsClarification=true and include ask_clarification.",
+              `Timezone: ${params.timezone}.`,
+              `Current time in timezone: ${params.nowIsoInTimezone}.`
+            ].join(" ")
+          },
+          {
+            role: "user",
+            content: params.userMessage
+          }
+        ]
+      })
+    );
+
+    const rawOutput = completion.choices[0]?.message?.content?.trim() ?? null;
+    if (!rawOutput) {
+      return {
+        rawOutput: null,
+        plan: null,
+        validationErrors: ["Planner returned empty response."]
+      };
+    }
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(rawOutput);
+    } catch {
+      return {
+        rawOutput,
+        plan: null,
+        validationErrors: ["Planner returned non-JSON output."]
+      };
+    }
+
+    const normalizedParsedJson = normalizePlannerPayload(parsedJson);
+    const parsed = messageActionPlanSchema.safeParse(normalizedParsedJson);
+    if (!parsed.success) {
+      return {
+        rawOutput,
+        plan: null,
+        validationErrors: parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+      };
+    }
+
+    return {
+      rawOutput,
+      plan: parsed.data as MessageActionPlan,
+      validationErrors: []
+    };
+  }
+
   private async runWithTimeout<T>(operation: () => Promise<T>): Promise<T> {
     const timeoutPromise = new Promise<never>((_, reject) => {
       setTimeout(() => reject(new Error("OpenAI request timed out.")), env.OPENAI_TIMEOUT_MS);
@@ -493,4 +684,65 @@ export class OpenAiClient {
 
     return Promise.race([operation(), timeoutPromise]);
   }
+}
+
+function normalizePlannerPayload(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload;
+  }
+
+  const root = payload as Record<string, unknown>;
+  if (!Array.isArray(root.actions)) {
+    return payload;
+  }
+
+  const normalizedActions = root.actions.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return entry;
+    }
+
+    const rawAction = entry as Record<string, unknown>;
+    const normalizedAction: Record<string, unknown> = { ...rawAction };
+
+    if (
+      typeof normalizedAction.type !== "string" &&
+      typeof normalizedAction.action === "string"
+    ) {
+      normalizedAction.type = normalizedAction.action;
+    }
+
+    if (
+      normalizedAction.type === "answer_user" &&
+      typeof normalizedAction.text !== "string" &&
+      typeof normalizedAction.message === "string"
+    ) {
+      normalizedAction.text = normalizedAction.message;
+    }
+
+    if (
+      normalizedAction.type === "ask_clarification" &&
+      typeof normalizedAction.question !== "string"
+    ) {
+      if (typeof normalizedAction.text === "string") {
+        normalizedAction.question = normalizedAction.text;
+      } else if (typeof normalizedAction.message === "string") {
+        normalizedAction.question = normalizedAction.message;
+      }
+    }
+
+    // Planner legacy alias: ensure strict schema compatibility.
+    delete normalizedAction.action;
+    if (
+      normalizedAction.type === "answer_user" ||
+      normalizedAction.type === "ask_clarification"
+    ) {
+      delete normalizedAction.message;
+    }
+    return normalizedAction;
+  });
+
+  return {
+    ...root,
+    actions: normalizedActions
+  };
 }

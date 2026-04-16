@@ -1,7 +1,12 @@
 import schedule, { Job } from "node-schedule";
+import { DateTime } from "luxon";
 
 import { env } from "../config/env";
 import { RemindersRepository } from "../db/repositories/remindersRepo";
+import {
+  nextScheduledOccurrenceAfter,
+  parseWeeklyRecurrenceJson
+} from "../reminders/weeklyRecurrence";
 
 export class ReminderScheduler {
   private job: Job | null = null;
@@ -47,7 +52,26 @@ export class ReminderScheduler {
         try {
           const sent = await this.sendReminder(reminder.chatId, text);
           if (sent) {
-            await this.remindersRepo.markSent(reminder.id);
+            const recurrence = parseWeeklyRecurrenceJson(reminder.recurrenceJson);
+            if (recurrence) {
+              const nextDue = nextScheduledOccurrenceAfter(
+                DateTime.utc(),
+                reminder.timezone,
+                recurrence.weekdays,
+                recurrence.hour,
+                recurrence.minute
+              );
+              if (nextDue) {
+                await this.remindersRepo.reschedulePendingDueAt(reminder.id, nextDue);
+              } else {
+                await this.remindersRepo.markFailed(
+                  reminder.id,
+                  "Could not compute next recurring reminder time."
+                );
+              }
+            } else {
+              await this.remindersRepo.markSent(reminder.id);
+            }
           } else {
             await this.remindersRepo.markFailed(
               reminder.id,

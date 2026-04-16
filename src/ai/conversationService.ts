@@ -45,12 +45,56 @@ export class ConversationService {
     return assistantReply;
   }
 
+  async recordTurn(
+    chatId: number,
+    userId: number,
+    userMessage: string,
+    assistantReply: string
+  ): Promise<void> {
+    const existingSession = await this.sessionsRepo.getSession(chatId);
+    const history = existingSession?.messages ?? [];
+    const boundedHistory = history.slice(-env.MEMORY_MESSAGE_LIMIT);
+
+    const userTurn: ChatMessage = {
+      role: "user",
+      content: userMessage,
+      createdAt: new Date().toISOString()
+    };
+    const assistantTurn: ChatMessage = {
+      role: "assistant",
+      content: assistantReply,
+      createdAt: new Date().toISOString()
+    };
+
+    const updatedMessages: ChatMessage[] = [...boundedHistory, userTurn, assistantTurn].slice(
+      -env.MEMORY_MESSAGE_LIMIT
+    );
+
+    await this.sessionsRepo.upsertSession(chatId, updatedMessages);
+
+    try {
+      const memoryFacts = await this.userMemoryRepo.getTopFacts(chatId, userId, 6);
+      await this.tryLearnLongTermMemory(
+        chatId,
+        userId,
+        userMessage,
+        memoryFacts.map((fact) => fact.factText)
+      );
+    } catch (error) {
+      console.error("Failed to update turn memory:", error);
+    }
+  }
+
   private async tryLearnLongTermMemory(
     chatId: number,
     userId: number,
     userMessage: string,
     existingFacts: string[]
   ): Promise<void> {
+    if (!env.MEMORY_EXTRACTION_ENABLED) {
+      return;
+    }
+
     if (!isMemoryExtractionEligibleByLength(userMessage)) {
       return;
     }

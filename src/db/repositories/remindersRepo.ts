@@ -8,6 +8,7 @@ interface ReminderRow {
   message: string;
   due_at_utc: string;
   timezone: string;
+  recurrence_json: string | null;
   status: ReminderRecord["status"];
   error_message: string | null;
   created_at: string;
@@ -23,19 +24,21 @@ export class RemindersRepository {
     message: string;
     dueAtUtc: string;
     timezone: string;
+    recurrenceJson?: string | null;
   }): Promise<number> {
     const nowIso = new Date().toISOString();
     const result = await this.db.run(
       `
       INSERT INTO reminders
-      (chat_id, user_id, message, due_at_utc, timezone, status, error_message, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, ?)
+      (chat_id, user_id, message, due_at_utc, timezone, recurrence_json, status, error_message, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)
       `,
       params.chatId,
       params.userId,
       params.message,
       params.dueAtUtc,
       params.timezone,
+      params.recurrenceJson ?? null,
       nowIso,
       nowIso
     );
@@ -46,7 +49,7 @@ export class RemindersRepository {
   async getDuePendingReminders(nowUtcIso: string, limit = 50): Promise<ReminderRecord[]> {
     const rows = await this.db.all<ReminderRow[]>(
       `
-      SELECT id, chat_id, user_id, message, due_at_utc, timezone, status, error_message, created_at, updated_at
+      SELECT id, chat_id, user_id, message, due_at_utc, timezone, recurrence_json, status, error_message, created_at, updated_at
       FROM reminders
       WHERE status = 'pending' AND due_at_utc <= ?
       ORDER BY due_at_utc ASC
@@ -62,7 +65,7 @@ export class RemindersRepository {
   async getPendingRemindersByChat(chatId: number, limit = 20): Promise<ReminderRecord[]> {
     const rows = await this.db.all<ReminderRow[]>(
       `
-      SELECT id, chat_id, user_id, message, due_at_utc, timezone, status, error_message, created_at, updated_at
+      SELECT id, chat_id, user_id, message, due_at_utc, timezone, recurrence_json, status, error_message, created_at, updated_at
       FROM reminders
       WHERE chat_id = ? AND status = 'pending'
       ORDER BY due_at_utc ASC
@@ -78,7 +81,7 @@ export class RemindersRepository {
   async getPendingReminderById(chatId: number, reminderId: number): Promise<ReminderRecord | null> {
     const row = await this.db.get<ReminderRow>(
       `
-      SELECT id, chat_id, user_id, message, due_at_utc, timezone, status, error_message, created_at, updated_at
+      SELECT id, chat_id, user_id, message, due_at_utc, timezone, recurrence_json, status, error_message, created_at, updated_at
       FROM reminders
       WHERE chat_id = ? AND id = ? AND status = 'pending'
       `,
@@ -100,7 +103,7 @@ export class RemindersRepository {
 
     const row = await this.db.get<ReminderRow>(
       `
-      SELECT id, chat_id, user_id, message, due_at_utc, timezone, status, error_message, created_at, updated_at
+      SELECT id, chat_id, user_id, message, due_at_utc, timezone, recurrence_json, status, error_message, created_at, updated_at
       FROM reminders
       WHERE chat_id = ? AND status = 'pending' AND LOWER(TRIM(message)) = LOWER(TRIM(?))
       ORDER BY due_at_utc DESC
@@ -108,6 +111,38 @@ export class RemindersRepository {
       `,
       chatId,
       normalizedMessage
+    );
+
+    return row ? mapReminderRow(row) : null;
+  }
+
+  async getExistingPendingReminder(params: {
+    chatId: number;
+    message: string;
+    dueAtUtc: string;
+    recurrenceJson?: string | null;
+  }): Promise<ReminderRecord | null> {
+    const normalizedMessage = params.message.trim();
+    if (!normalizedMessage) {
+      return null;
+    }
+
+    const row = await this.db.get<ReminderRow>(
+      `
+      SELECT id, chat_id, user_id, message, due_at_utc, timezone, recurrence_json, status, error_message, created_at, updated_at
+      FROM reminders
+      WHERE chat_id = ?
+        AND status = 'pending'
+        AND LOWER(TRIM(message)) = LOWER(TRIM(?))
+        AND due_at_utc = ?
+        AND COALESCE(recurrence_json, '') = COALESCE(?, '')
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      params.chatId,
+      normalizedMessage,
+      params.dueAtUtc,
+      params.recurrenceJson ?? null
     );
 
     return row ? mapReminderRow(row) : null;
@@ -126,6 +161,20 @@ export class RemindersRepository {
       `,
       updates.message,
       updates.dueAtUtc,
+      nowIso,
+      reminderId
+    );
+  }
+
+  async reschedulePendingDueAt(reminderId: number, dueAtUtc: string): Promise<void> {
+    const nowIso = new Date().toISOString();
+    await this.db.run(
+      `
+      UPDATE reminders
+      SET due_at_utc = ?, updated_at = ?
+      WHERE id = ? AND status = 'pending'
+      `,
+      dueAtUtc,
       nowIso,
       reminderId
     );
@@ -195,6 +244,7 @@ function mapReminderRow(row: ReminderRow): ReminderRecord {
     message: row.message,
     dueAtUtc: row.due_at_utc,
     timezone: row.timezone,
+    recurrenceJson: row.recurrence_json ?? null,
     status: row.status,
     errorMessage: row.error_message,
     createdAt: row.created_at,
