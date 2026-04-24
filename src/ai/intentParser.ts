@@ -5,7 +5,8 @@ import type {
   MessageActionPlanNormalizationResult,
   ParsedReminderIntent,
   PlannedAction,
-  PlannedCreateReminderAction
+  PlannedCreateReminderAction,
+  PlannedSetNewsSubscriptionAction
 } from "../types/domain";
 import {
   extractMentionedWeekdays,
@@ -330,6 +331,23 @@ function normalizePlannedAction(
         ...action,
         text: action.text.trim()
       };
+    case "fetch_news": {
+      const category = action.category?.trim() || null;
+      const maxItems =
+        typeof action.maxItems === "number" && Number.isFinite(action.maxItems)
+          ? Math.max(1, Math.min(10, Math.trunc(action.maxItems)))
+          : null;
+      return {
+        ...action,
+        category,
+        maxItems
+      };
+    }
+    case "set_news_subscription":
+      return normalizeSetNewsSubscriptionAction(action, normalizationErrors, actionIndex);
+    case "show_news_subscription":
+    case "delete_news_subscription":
+      return action;
     case "list_reminders":
       return {
         ...action,
@@ -473,5 +491,29 @@ function normalizeDeleteAction<
   return {
     ...action,
     ids: uniqueIds
+  };
+}
+
+function normalizeSetNewsSubscriptionAction(
+  action: PlannedSetNewsSubscriptionAction,
+  normalizationErrors: string[],
+  actionIndex: number
+): PlannedSetNewsSubscriptionAction | null {
+  const category = action.category.trim();
+  if (!category) {
+    normalizationErrors.push(`actions.${actionIndex}.category: News category is required.`);
+    return null;
+  }
+  if (!Number.isInteger(action.hour) || action.hour < 0 || action.hour > 23) {
+    normalizationErrors.push(`actions.${actionIndex}.hour: Must be 0-23.`);
+    return null;
+  }
+  if (!Number.isInteger(action.minute) || action.minute < 0 || action.minute > 59) {
+    normalizationErrors.push(`actions.${actionIndex}.minute: Must be 0-59.`);
+    return null;
+  }
+  return {
+    ...action,
+    category
   };
 }

@@ -5,8 +5,11 @@ import { OpenAiClient } from "../ai/openaiClient";
 import { ConversationService } from "../ai/conversationService";
 import { IntentParserService } from "../ai/intentParser";
 import { env } from "../config/env";
+import { NewsSubscriptionsRepository } from "../db/repositories/newsSubscriptionsRepo";
 import { RemindersRepository } from "../db/repositories/remindersRepo";
 import { TasksRepository } from "../db/repositories/tasksRepo";
+import { normalizeNewsCategory } from "../news/feeds";
+import { NewsService } from "../news/newsService";
 import {
   formatWeeklyRecurrenceSummary,
   serializeWeeklyRecurrence
@@ -32,7 +35,9 @@ export class MessageRouter {
     private readonly conversationService: ConversationService,
     private readonly intentParser: IntentParserService,
     private readonly remindersRepo: RemindersRepository,
-    private readonly tasksRepo: TasksRepository
+    private readonly tasksRepo: TasksRepository,
+    private readonly newsSubscriptionsRepo: NewsSubscriptionsRepository,
+    private readonly newsService: NewsService
   ) {}
 
   async routeTextMessage(params: {
@@ -328,6 +333,20 @@ export class MessageRouter {
         return this.createTaskFromPlannedAction(params.chatId, params.userId, action.task);
       case "answer_user":
         return action.text.trim();
+      case "fetch_news":
+        return this.fetchNewsFromPlannedAction(action.category ?? undefined, action.maxItems ?? undefined);
+      case "set_news_subscription":
+        return this.setNewsSubscriptionFromPlannedAction(
+          params.chatId,
+          params.userId,
+          action.category,
+          action.hour,
+          action.minute
+        );
+      case "show_news_subscription":
+        return this.showNewsSubscription(params.chatId);
+      case "delete_news_subscription":
+        return this.deleteNewsSubscription(params.chatId);
       case "list_reminders":
         return this.listPendingReminders(params.chatId, action.filter ?? undefined);
       case "list_tasks":
@@ -428,6 +447,94 @@ export class MessageRouter {
 
     const id = await this.tasksRepo.createTask({ chatId, userId, task: normalizedTask });
     return `✅ Task added #${id}: ${normalizedTask}`;
+  }
+
+  private async fetchNewsFromPlannedAction(
+    rawCategory?: string,
+    maxItems?: number
+  ): Promise<string> {
+    const normalizedCategory = normalizeNewsCategory(rawCategory);
+    if (rawCategory?.trim() && !normalizedCategory) {
+      const supported = this.newsService.getSupportedCategoriesText();
+      return `I support these news categories: ${supported}.`;
+    }
+
+    try {
+      return await this.newsService.buildDigest({
+        category: normalizedCategory ?? rawCategory ?? null,
+        maxItems: maxItems ?? null
+      });
+    } catch (error) {
+      console.error("Failed to fetch on-demand news:", error);
+      return "I couldn't fetch the news right now. Please try again in a minute.";
+    }
+  }
+
+  private async setNewsSubscriptionFromPlannedAction(
+    chatId: number,
+    userId: number,
+    rawCategory: string,
+    hour: number,
+    minute: number
+  ): Promise<string> {
+    const category = normalizeNewsCategory(rawCategory);
+    if (!category) {
+      const supported = this.newsService.getSupportedCategoriesText();
+      return `Please choose a supported category: ${supported}.`;
+    }
+
+    const localNow = DateTime.now().setZone(env.APP_TIMEZONE);
+    let nextRunLocal = localNow.set({
+      hour,
+      minute,
+      second: 0,
+      millisecond: 0
+    });
+    if (nextRunLocal <= localNow) {
+      nextRunLocal = nextRunLocal.plus({ days: 1 });
+    }
+
+    await this.newsSubscriptionsRepo.upsertSubscription({
+      chatId,
+      userId,
+      category,
+      timezone: env.APP_TIMEZONE,
+      scheduleHour: hour,
+      scheduleMinute: minute,
+      nextRunAtUtc: nextRunLocal.toUTC().toISO() ?? new Date().toISOString()
+    });
+
+    const scheduleTime = nextRunLocal.toFormat("HH:mm");
+    return `✅ Daily ${category.toUpperCase()} news scheduled at ${scheduleTime} (${env.APP_TIMEZONE}).`;
+  }
+
+  private async showNewsSubscription(chatId: number): Promise<string> {
+    const subscription = await this.newsSubscriptionsRepo.getSubscriptionByChat(chatId);
+    if (!subscription) {
+      return "You don't have a daily news subscription yet.";
+    }
+
+    const nextRunLocal = DateTime.fromISO(subscription.nextRunAtUtc, { zone: "utc" }).setZone(
+      subscription.timezone
+    );
+    const formattedNextRun = nextRunLocal.isValid
+      ? nextRunLocal.toFormat("dd/LL/yyyy HH:mm")
+      : "unknown";
+
+    return [
+      "🗞️ Current daily news schedule",
+      `Category: ${subscription.category.toUpperCase()}`,
+      `Time: ${String(subscription.scheduleHour).padStart(2, "0")}:${String(subscription.scheduleMinute).padStart(2, "0")} (${subscription.timezone})`,
+      `Next run: ${formattedNextRun}`
+    ].join("\n");
+  }
+
+  private async deleteNewsSubscription(chatId: number): Promise<string> {
+    const deleted = await this.newsSubscriptionsRepo.deleteSubscriptionByChat(chatId);
+    if (deleted < 1) {
+      return "You don't have a daily news subscription to remove.";
+    }
+    return "✅ Daily news subscription removed.";
   }
 
   private logPlannerTelemetry(payload: {

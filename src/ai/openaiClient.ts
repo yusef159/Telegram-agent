@@ -92,6 +92,35 @@ const plannedAnswerUserActionSchema = z
   })
   .strict();
 
+const plannedFetchNewsActionSchema = z
+  .object({
+    type: z.literal("fetch_news"),
+    category: z.string().nullable().optional(),
+    maxItems: z.number().int().min(1).max(10).nullable().optional()
+  })
+  .strict();
+
+const plannedSetNewsSubscriptionActionSchema = z
+  .object({
+    type: z.literal("set_news_subscription"),
+    category: z.string().min(1),
+    hour: z.number().int().min(0).max(23),
+    minute: z.number().int().min(0).max(59)
+  })
+  .strict();
+
+const plannedShowNewsSubscriptionActionSchema = z
+  .object({
+    type: z.literal("show_news_subscription")
+  })
+  .strict();
+
+const plannedDeleteNewsSubscriptionActionSchema = z
+  .object({
+    type: z.literal("delete_news_subscription")
+  })
+  .strict();
+
 const plannedListRemindersActionSchema = z
   .object({
     type: z.literal("list_reminders"),
@@ -146,6 +175,10 @@ const plannedActionSchema = z.discriminatedUnion("type", [
   plannedCreateReminderActionSchema,
   plannedCreateTaskActionSchema,
   plannedAnswerUserActionSchema,
+  plannedFetchNewsActionSchema,
+  plannedSetNewsSubscriptionActionSchema,
+  plannedShowNewsSubscriptionActionSchema,
+  plannedDeleteNewsSubscriptionActionSchema,
   plannedListRemindersActionSchema,
   plannedListTasksActionSchema,
   plannedDeleteReminderActionSchema,
@@ -623,9 +656,12 @@ export class OpenAiClient {
               "Return JSON only with keys: version, actions, needsClarification, clarificationQuestion.",
               `actions count must be <= ${PLANNER_MAX_ACTIONS}.`,
               "Action key must be 'type'.",
-              "Allowed types: create_reminder, create_task, answer_user, list_reminders, list_tasks, delete_reminder, delete_task, adjust_reminder, ask_clarification.",
+              "Allowed types: create_reminder, create_task, answer_user, fetch_news, set_news_subscription, show_news_subscription, delete_news_subscription, list_reminders, list_tasks, delete_reminder, delete_task, adjust_reminder, ask_clarification.",
               "Chat/general questions => one answer_user action.",
               "create_reminder needs message + dueAtIso (ISO with offset); weekly recurrence: {kind:'weekly', weekdays:[1..7], hour, minute}.",
+              "fetch_news optionally includes category and maxItems.",
+              "set_news_subscription requires category + hour + minute in 24h local time.",
+              "show_news_subscription and delete_news_subscription take no extra fields.",
               "delete_* uses mode single|ids|count|all; use queryText for text match, listPosition for numbered list.",
               "If ambiguous, set needsClarification=true and include ask_clarification.",
               `Timezone: ${params.timezone}.`,

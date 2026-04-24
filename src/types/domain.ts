@@ -63,6 +63,27 @@ export interface PlannedAnswerUserAction {
   text: string;
 }
 
+export interface PlannedFetchNewsAction {
+  type: "fetch_news";
+  category?: string | null;
+  maxItems?: number | null;
+}
+
+export interface PlannedSetNewsSubscriptionAction {
+  type: "set_news_subscription";
+  category: string;
+  hour: number;
+  minute: number;
+}
+
+export interface PlannedShowNewsSubscriptionAction {
+  type: "show_news_subscription";
+}
+
+export interface PlannedDeleteNewsSubscriptionAction {
+  type: "delete_news_subscription";
+}
+
 export interface PlannedListRemindersAction {
   type: "list_reminders";
   filter?: string | null;
@@ -105,6 +126,10 @@ export type PlannedAction =
   | PlannedCreateReminderAction
   | PlannedCreateTaskAction
   | PlannedAnswerUserAction
+  | PlannedFetchNewsAction
+  | PlannedSetNewsSubscriptionAction
+  | PlannedShowNewsSubscriptionAction
+  | PlannedDeleteNewsSubscriptionAction
   | PlannedListRemindersAction
   | PlannedListTasksAction
   | PlannedDeleteReminderAction
@@ -137,6 +162,24 @@ export interface TaskRecord {
   userId: number;
   task: string;
   status: TaskStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type NewsSubscriptionStatus = "active" | "disabled";
+
+export interface NewsSubscriptionRecord {
+  id: number;
+  chatId: number;
+  userId: number;
+  category: string;
+  timezone: string;
+  scheduleHour: number;
+  scheduleMinute: number;
+  nextRunAtUtc: string;
+  status: NewsSubscriptionStatus;
+  lastSentAtUtc: string | null;
+  errorMessage: string | null;
   createdAt: string;
   updatedAt: string;
 }

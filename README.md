@@ -59,6 +59,34 @@ Stop:
 docker compose down
 ```
 
+## 5) GitHub Actions auto-deploy to Raspberry Pi
+
+This repository includes a deployment workflow at `.github/workflows/deploy.yml`.
+It triggers on pushes to `main` (and can also be run manually).
+
+### Required GitHub secrets
+
+- `PI_HOST`: Raspberry Pi IP or hostname
+- `PI_USER`: SSH user on the Raspberry Pi
+- `PI_SSH_KEY`: private SSH key used by GitHub Actions
+- `PI_PORT`: SSH port (usually `22`)
+- `PI_APP_DIR`: absolute path on Pi where this repo lives
+
+### One-time server setup
+
+On your Raspberry Pi, clone this repository in `PI_APP_DIR`, create `.env`,
+and verify Docker compose works:
+
+```bash
+cd /path/to/your/app
+cp .env.example .env
+# fill real TELEGRAM_BOT_TOKEN and AI_API_KEY
+docker compose up --build -d
+```
+
+After that, every push to `main` will run build validation in GitHub Actions,
+SSH into your Pi, pull latest changes, and restart with Docker compose.
+
 ## Project Structure
 
 - `src/bot`: Telegram handlers and message routing

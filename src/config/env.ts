@@ -26,6 +26,9 @@ const envSchema = z.object({
   DATABASE_PATH: z.string().min(1).default("./data/bot.sqlite"),
   APP_TIMEZONE: z.string().min(1).default("Asia/Jerusalem"),
   SCHEDULER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(20),
+  NEWS_SCHEDULER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(60),
+  NEWS_FETCH_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
+  NEWS_MAX_ITEMS: z.coerce.number().int().min(1).max(10).default(5),
   MEMORY_MESSAGE_LIMIT: z.coerce.number().int().positive().default(6),
   OPENAI_TIMEOUT_MS: z.coerce.number().int().positive().default(15000)
 });

@@ -69,6 +69,29 @@ export async function runMigrations(db: AppDatabase): Promise<void> {
     ON user_memory(chat_id, user_id, score, updated_at);
   `);
 
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS news_subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id INTEGER NOT NULL UNIQUE,
+      user_id INTEGER NOT NULL,
+      category TEXT NOT NULL,
+      timezone TEXT NOT NULL DEFAULT 'Asia/Jerusalem',
+      schedule_hour INTEGER NOT NULL,
+      schedule_minute INTEGER NOT NULL,
+      next_run_at_utc TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      last_sent_at_utc TEXT NULL,
+      error_message TEXT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+
+  await db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_news_subscriptions_status_due
+    ON news_subscriptions(status, next_run_at_utc);
+  `);
+
   const reminderColumns = (await db.all(`PRAGMA table_info(reminders);`)) as Array<{ name: string }>;
   const hasRecurrence = reminderColumns.some((column: { name: string }) => column.name === "recurrence_json");
   if (!hasRecurrence) {
