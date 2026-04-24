@@ -66,7 +66,8 @@ It triggers on pushes to `main` (and can also be run manually).
 
 ### Required GitHub secrets
 
-- `PI_HOST`: Raspberry Pi IP or hostname
+- `TAILSCALE_AUTHKEY`: Tailscale auth key for GitHub Actions runner
+- `PI_HOST`: Raspberry Pi Tailscale IP or MagicDNS hostname
 - `PI_USER`: SSH user on the Raspberry Pi
 - `PI_SSH_KEY`: private SSH key used by GitHub Actions
 - `PI_PORT`: SSH port (usually `22`)
@@ -85,7 +86,8 @@ docker compose up --build -d
 ```
 
 After that, every push to `main` will run build validation in GitHub Actions,
-SSH into your Pi, pull latest changes, and restart with Docker compose.
+connect to your Tailnet, SSH into your Pi, pull latest changes, and restart
+with Docker compose.
 
 ## Project Structure
 
