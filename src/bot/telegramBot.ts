@@ -6,6 +6,13 @@ import { MessageRouter } from "./messageRouter";
 
 export class TelegramBotService {
   private readonly bot: Telegraf;
+  private static readonly COMMANDS: Array<{ command: string; description: string }> = [
+    { command: "start", description: "Show welcome message" },
+    { command: "reminders", description: "Show pending reminders" },
+    { command: "tasks", description: "Show pending tasks" },
+    { command: "all", description: "Show reminders and tasks" },
+    { command: "help", description: "Show available commands" }
+  ];
 
   constructor(
     private readonly messageRouter: MessageRouter,
@@ -56,9 +63,43 @@ export class TelegramBotService {
         ctx.message.caption ?? "Please analyze this image."
       );
     });
+
+    this.bot.command("reminders", async (ctx) => {
+      await this.handleShortcutCommand(ctx.chat.id, "reminders");
+    });
+
+    // Keep this alias because users often type this typo.
+    this.bot.command("remiders", async (ctx) => {
+      await this.handleShortcutCommand(ctx.chat.id, "reminders");
+    });
+
+    this.bot.command("tasks", async (ctx) => {
+      await this.handleShortcutCommand(ctx.chat.id, "tasks");
+    });
+
+    this.bot.command("all", async (ctx) => {
+      await this.handleShortcutCommand(ctx.chat.id, "all");
+    });
+
+    this.bot.command("help", async (ctx) => {
+      const helpText = [
+        "Available commands:",
+        "/reminders - Show pending reminders",
+        "/remiders - Same as reminders",
+        "/tasks - Show pending tasks",
+        "/all - Show reminders and tasks",
+        "/help - Show this help"
+      ].join("\n");
+      await this.safeReply(ctx.chat.id, helpText);
+    });
   }
 
   async launch(): Promise<void> {
+    try {
+      await this.bot.telegram.setMyCommands(TelegramBotService.COMMANDS);
+    } catch (error) {
+      console.error("Failed to configure Telegram command menu:", error);
+    }
     await this.bot.launch();
     console.log("Telegram bot is running.");
   }
@@ -155,6 +196,19 @@ export class TelegramBotService {
         chatId,
         "I could not process that image right now. Please try again in a moment."
       );
+    }
+  }
+
+  private async handleShortcutCommand(
+    chatId: number,
+    command: "reminders" | "tasks" | "all"
+  ): Promise<void> {
+    try {
+      const reply = await this.messageRouter.handleShortcutCommand({ chatId, command });
+      await this.safeReply(chatId, reply);
+    } catch (error) {
+      console.error("Failed to handle shortcut command:", error);
+      await this.safeReply(chatId, "I couldn't process that command right now. Please try again.");
     }
   }
 }

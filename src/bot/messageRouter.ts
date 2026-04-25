@@ -124,6 +124,22 @@ export class MessageRouter {
     return noActionReply;
   }
 
+  async handleShortcutCommand(params: {
+    chatId: number;
+    command: "reminders" | "tasks" | "all";
+  }): Promise<string> {
+    switch (params.command) {
+      case "reminders":
+        return this.listPendingReminders(params.chatId, "show reminders");
+      case "tasks":
+        return this.listPendingTasks(params.chatId);
+      case "all":
+        return this.getAllPendingInfo(params.chatId);
+      default:
+        return "Unsupported shortcut command.";
+    }
+  }
+
   private async routeTextMessageLegacy(
     params: {
       chatId: number;
