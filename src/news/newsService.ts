@@ -1,200 +1,63 @@
 import { DateTime } from "luxon";
 
 import { env } from "../config/env";
-import {
-  getSupportedNewsCategories,
-  resolveNewsFeeds,
-  type NewsCategory,
-  type RssFeedSource
-} from "./feeds";
-
-interface FeedItem {
-  title: string;
-  link: string;
-  publishedAt: string | null;
-  sourceName: string;
-}
+import { OpenAiClient } from "../ai/openaiClient";
+import { WebSearchClient, type WebSearchResult } from "./webSearchClient";
 
 export class NewsService {
-  async buildDigest(params: { category?: string | null; maxItems?: number | null }): Promise<string> {
-    const { category, feeds } = resolveNewsFeeds(params.category);
+  constructor(
+    private readonly openAiClient: OpenAiClient,
+    private readonly webSearchClient: WebSearchClient
+  ) {}
+
+  async buildDigest(params: { topic?: string | null; maxItems?: number | null }): Promise<string> {
+    const topic = normalizeTopicQuery(params.topic);
     const maxItems = normalizeMaxItems(params.maxItems);
 
-    const feedResults = await Promise.all(
-      feeds.map(async (feed) => {
-        try {
-          return await this.fetchFeedItems(feed);
-        } catch (error) {
-          console.warn(`news_feed_fetch_failed (${feed.name})`, error);
-          return [];
-        }
-      })
-    );
-
-    const deduped = dedupeFeedItems(feedResults.flat());
-    const sortedByDate = deduped.sort((a, b) => {
-      const aMs = parsePublishedAtMs(a.publishedAt);
-      const bMs = parsePublishedAtMs(b.publishedAt);
-      return bMs - aMs;
-    });
-    const selected = sortedByDate.slice(0, maxItems);
-
-    if (selected.length < 1) {
-      const categoryLabel = toCategoryLabel(category);
-      const supported = getSupportedNewsCategories().join(", ");
+    let selected: WebSearchResult[] = [];
+    try {
+      selected = await this.webSearchClient.search({
+        query: topic,
+        maxResults: maxItems
+      });
+    } catch (error) {
+      console.warn("web_search_failed", error);
       return [
-        `I couldn't fetch fresh ${categoryLabel} news right now.`,
-        `Try again in a few minutes, or choose another category: ${supported}.`
+        `I couldn't search the web for "${topic}" right now.`,
+        "Please try again in a few minutes."
       ].join("\n");
     }
 
-    const lines = selected.map((item, index) => {
-      const timestamp = formatPublishedTime(item.publishedAt);
-      const title = truncate(item.title, 180);
-      return `${index + 1}. ${title}\n   Source: ${item.sourceName}${timestamp ? ` (${timestamp})` : ""}\n   ${item.link}`;
+    if (selected.length < 1) {
+      return [
+        `I couldn't find fresh web results for "${topic}" right now.`,
+        "Try again in a few minutes or rephrase the topic."
+      ].join("\n");
+    }
+
+    const summary = await this.openAiClient.summarizeNewsSearchResults({
+      topic,
+      results: selected
     });
 
     return [
-      `📰 ${toCategoryLabel(category)} news digest`,
+      `📰 ${topic} news digest`,
       `Updated ${DateTime.now().setZone(env.APP_TIMEZONE).toFormat("dd/LL/yyyy HH:mm")}`,
       "",
-      ...lines
+      summary,
+      "",
+      "Sources:",
+      ...selected.map((item, index) => {
+        const timestamp = formatPublishedTime(item.publishedAt);
+        const title = truncate(item.title, 180);
+        return `${index + 1}. ${title}${timestamp ? ` (${timestamp})` : ""}\n   ${item.url}`;
+      })
     ].join("\n");
   }
 
   getSupportedCategoriesText(): string {
-    return getSupportedNewsCategories().join(", ");
+    return "Any topic, for example: OpenAI, Nvidia earnings, global inflation, TypeScript 6.";
   }
-
-  private async fetchFeedItems(feed: RssFeedSource): Promise<FeedItem[]> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => {
-      controller.abort();
-    }, env.NEWS_FETCH_TIMEOUT_MS);
-
-    try {
-      const response = await fetch(feed.url, {
-        headers: {
-          "User-Agent": "telgram-agent-news-fetcher/1.0",
-          Accept: "application/rss+xml, application/xml, text/xml, application/atom+xml"
-        },
-        signal: controller.signal
-      });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      const xml = await response.text();
-      return parseRssOrAtom(xml, feed.name);
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
-}
-
-function parseRssOrAtom(xml: string, sourceName: string): FeedItem[] {
-  const rssItems = extractRssItems(xml, sourceName);
-  if (rssItems.length > 0) {
-    return rssItems;
-  }
-  return extractAtomEntries(xml, sourceName);
-}
-
-function extractRssItems(xml: string, sourceName: string): FeedItem[] {
-  const blocks = matchBlocks(xml, "item");
-  return blocks
-    .map((block) => ({
-      title: decodeXml(extractTagValue(block, "title")),
-      link: decodeXml(extractTagValue(block, "link")),
-      publishedAt: decodeXml(extractTagValue(block, "pubDate")) || null,
-      sourceName
-    }))
-    .filter((item) => item.title && item.link);
-}
-
-function extractAtomEntries(xml: string, sourceName: string): FeedItem[] {
-  const blocks = matchBlocks(xml, "entry");
-  return blocks
-    .map((block) => ({
-      title: decodeXml(extractTagValue(block, "title")),
-      link: decodeXml(extractAtomLink(block)),
-      publishedAt: decodeXml(extractTagValue(block, "updated") || extractTagValue(block, "published")) || null,
-      sourceName
-    }))
-    .filter((item) => item.title && item.link);
-}
-
-function extractTagValue(xmlChunk: string, tagName: string): string {
-  const pattern = new RegExp(`<${tagName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tagName}>`, "i");
-  const match = xmlChunk.match(pattern);
-  if (!match) {
-    return "";
-  }
-  return stripCdata(match[1]).trim();
-}
-
-function extractAtomLink(xmlChunk: string): string {
-  const selfClosingMatch = xmlChunk.match(/<link\b([^>]*)\/>/i);
-  if (selfClosingMatch) {
-    const href = extractAttributeValue(selfClosingMatch[1], "href");
-    if (href) {
-      return href;
-    }
-  }
-
-  const fullTagMatch = xmlChunk.match(/<link\b([^>]*)>([\s\S]*?)<\/link>/i);
-  if (fullTagMatch) {
-    const href = extractAttributeValue(fullTagMatch[1], "href");
-    if (href) {
-      return href;
-    }
-    return fullTagMatch[2].trim();
-  }
-
-  return "";
-}
-
-function extractAttributeValue(attributesChunk: string, attributeName: string): string {
-  const pattern = new RegExp(`${attributeName}\\s*=\\s*['"]([^'"]+)['"]`, "i");
-  const match = attributesChunk.match(pattern);
-  return match?.[1]?.trim() ?? "";
-}
-
-function matchBlocks(xml: string, tagName: string): string[] {
-  const pattern = new RegExp(`<${tagName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tagName}>`, "gi");
-  const blocks: string[] = [];
-  let match = pattern.exec(xml);
-  while (match) {
-    blocks.push(match[1]);
-    match = pattern.exec(xml);
-  }
-  return blocks;
-}
-
-function stripCdata(text: string): string {
-  return text.replace(/^<!\[CDATA\[/, "").replace(/\]\]>$/, "");
-}
-
-function decodeXml(text: string): string {
-  return text
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
-}
-
-function dedupeFeedItems(items: FeedItem[]): FeedItem[] {
-  const seen = new Set<string>();
-  const unique: FeedItem[] = [];
-  for (const item of items) {
-    const key = `${item.link.trim().toLowerCase()}|${item.title.trim().toLowerCase()}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    unique.push(item);
-  }
-  return unique;
 }
 
 function parsePublishedAtMs(publishedAt: string | null): number {
@@ -228,21 +91,9 @@ function normalizeMaxItems(rawMaxItems: number | null | undefined): number {
   return Math.max(1, Math.min(10, Math.trunc(rawMaxItems)));
 }
 
-function toCategoryLabel(category: NewsCategory): string {
-  switch (category) {
-    case "ai":
-      return "AI";
-    case "technology":
-      return "Technology";
-    case "business":
-      return "Business";
-    case "crypto":
-      return "Crypto";
-    case "world":
-      return "World";
-    default:
-      return "General";
-  }
+function normalizeTopicQuery(rawTopic: string | null | undefined): string {
+  const normalized = (rawTopic ?? "").trim();
+  return normalized || "latest world news";
 }
 
 function truncate(value: string, maxLength: number): string {

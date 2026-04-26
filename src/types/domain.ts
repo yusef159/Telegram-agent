@@ -65,13 +65,13 @@ export interface PlannedAnswerUserAction {
 
 export interface PlannedFetchNewsAction {
   type: "fetch_news";
-  category?: string | null;
+  topic?: string | null;
   maxItems?: number | null;
 }
 
 export interface PlannedSetNewsSubscriptionAction {
   type: "set_news_subscription";
-  category: string;
+  topic: string;
   hour: number;
   minute: number;
 }
@@ -82,6 +82,9 @@ export interface PlannedShowNewsSubscriptionAction {
 
 export interface PlannedDeleteNewsSubscriptionAction {
   type: "delete_news_subscription";
+  id?: number | null;
+  topic?: string | null;
+  all?: boolean | null;
 }
 
 export interface PlannedListRemindersAction {
@@ -172,7 +175,7 @@ export interface NewsSubscriptionRecord {
   id: number;
   chatId: number;
   userId: number;
-  category: string;
+  topicQuery: string;
   timezone: string;
   scheduleHour: number;
   scheduleMinute: number;

@@ -29,6 +29,10 @@ const envSchema = z.object({
   NEWS_SCHEDULER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(60),
   NEWS_FETCH_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
   NEWS_MAX_ITEMS: z.coerce.number().int().min(1).max(10).default(5),
+  WEB_SEARCH_API_URL: z.string().url().default("https://api.tavily.com/search"),
+  WEB_SEARCH_API_KEY: z.string().default(""),
+  WEB_SEARCH_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+  WEB_SEARCH_MAX_RESULTS: z.coerce.number().int().min(1).max(10).default(5),
   MEMORY_MESSAGE_LIMIT: z.coerce.number().int().positive().default(6),
   OPENAI_TIMEOUT_MS: z.coerce.number().int().positive().default(15000)
 });

@@ -11,6 +11,7 @@ import { TasksRepository } from "./db/repositories/tasksRepo";
 import { UserMemoryRepository } from "./db/repositories/userMemoryRepo";
 import { createDatabaseConnection } from "./db/sqlite";
 import { NewsService } from "./news/newsService";
+import { WebSearchClient } from "./news/webSearchClient";
 import { NewsScheduler } from "./scheduler/newsScheduler";
 import { ReminderScheduler } from "./scheduler/reminderScheduler";
 
@@ -24,7 +25,8 @@ async function bootstrap(): Promise<void> {
   const newsSubscriptionsRepo = new NewsSubscriptionsRepository(db);
   const userMemoryRepo = new UserMemoryRepository(db);
   const openAiClient = new OpenAiClient();
-  const newsService = new NewsService();
+  const webSearchClient = new WebSearchClient();
+  const newsService = new NewsService(openAiClient, webSearchClient);
 
   const conversationService = new ConversationService(openAiClient, sessionsRepo, userMemoryRepo);
   const intentParser = new IntentParserService(openAiClient);

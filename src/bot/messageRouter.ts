@@ -8,7 +8,6 @@ import { env } from "../config/env";
 import { NewsSubscriptionsRepository } from "../db/repositories/newsSubscriptionsRepo";
 import { RemindersRepository } from "../db/repositories/remindersRepo";
 import { TasksRepository } from "../db/repositories/tasksRepo";
-import { normalizeNewsCategory } from "../news/feeds";
 import { NewsService } from "../news/newsService";
 import {
   formatWeeklyRecurrenceSummary,
@@ -50,6 +49,11 @@ export class MessageRouter {
     const trimmedText = params.text.trim();
     if (!trimmedText) {
       return "Please send a message.";
+    }
+
+    const deterministicNewsReply = await this.tryHandleDeterministicNewsCommands(params.chatId, trimmedText);
+    if (deterministicNewsReply) {
+      return deterministicNewsReply;
     }
 
     if (!env.ACTION_PLANNER_ENABLED) {
@@ -124,9 +128,60 @@ export class MessageRouter {
     return noActionReply;
   }
 
+  private async tryHandleDeterministicNewsCommands(
+    chatId: number,
+    userText: string
+  ): Promise<string | null> {
+    const normalized = userText.trim();
+    const lower = normalized.toLowerCase();
+
+    if (
+      lower === "/news" ||
+      lower.startsWith("/news@") ||
+      /\b(show|list|view|display)\b.*\b(news subscriptions?|subscriptions?)\b/i.test(normalized)
+    ) {
+      return this.showNewsSubscription(chatId);
+    }
+
+    if (/\b(cancel|delete|remove)\b.*\b(all)\b.*\b(news subscriptions?)\b/i.test(normalized)) {
+      return this.deleteNewsSubscription(chatId, {
+        type: "delete_news_subscription",
+        all: true
+      });
+    }
+
+    const idMatch = normalized.match(
+      /\b(?:cancel|delete|remove)\b.*\bnews subscription\b.*#(\d+)\b/i
+    );
+    if (idMatch) {
+      const id = Number.parseInt(idMatch[1], 10);
+      if (Number.isFinite(id) && id > 0) {
+        return this.deleteNewsSubscription(chatId, {
+          type: "delete_news_subscription",
+          id
+        });
+      }
+    }
+
+    const topicMatch = normalized.match(
+      /\b(?:cancel|delete|remove)\b.*\bnews subscription\b(?:\s+for|\s+about)?\s+(.+)$/i
+    );
+    if (topicMatch) {
+      const topic = topicMatch[1]?.trim();
+      if (topic) {
+        return this.deleteNewsSubscription(chatId, {
+          type: "delete_news_subscription",
+          topic
+        });
+      }
+    }
+
+    return null;
+  }
+
   async handleShortcutCommand(params: {
     chatId: number;
-    command: "reminders" | "tasks" | "all";
+    command: "reminders" | "tasks" | "all" | "news";
   }): Promise<string> {
     switch (params.command) {
       case "reminders":
@@ -135,6 +190,8 @@ export class MessageRouter {
         return this.listPendingTasks(params.chatId);
       case "all":
         return this.getAllPendingInfo(params.chatId);
+      case "news":
+        return this.showNewsSubscription(params.chatId);
       default:
         return "Unsupported shortcut command.";
     }
@@ -350,19 +407,19 @@ export class MessageRouter {
       case "answer_user":
         return action.text.trim();
       case "fetch_news":
-        return this.fetchNewsFromPlannedAction(action.category ?? undefined, action.maxItems ?? undefined);
+        return this.fetchNewsFromPlannedAction(action.topic ?? undefined, action.maxItems ?? undefined);
       case "set_news_subscription":
         return this.setNewsSubscriptionFromPlannedAction(
           params.chatId,
           params.userId,
-          action.category,
+          action.topic,
           action.hour,
           action.minute
         );
       case "show_news_subscription":
         return this.showNewsSubscription(params.chatId);
       case "delete_news_subscription":
-        return this.deleteNewsSubscription(params.chatId);
+        return this.deleteNewsSubscription(params.chatId, action);
       case "list_reminders":
         return this.listPendingReminders(params.chatId, action.filter ?? undefined);
       case "list_tasks":
@@ -466,18 +523,13 @@ export class MessageRouter {
   }
 
   private async fetchNewsFromPlannedAction(
-    rawCategory?: string,
+    rawTopic?: string,
     maxItems?: number
   ): Promise<string> {
-    const normalizedCategory = normalizeNewsCategory(rawCategory);
-    if (rawCategory?.trim() && !normalizedCategory) {
-      const supported = this.newsService.getSupportedCategoriesText();
-      return `I support these news categories: ${supported}.`;
-    }
-
+    const topic = rawTopic?.trim() || null;
     try {
       return await this.newsService.buildDigest({
-        category: normalizedCategory ?? rawCategory ?? null,
+        topic,
         maxItems: maxItems ?? null
       });
     } catch (error) {
@@ -489,14 +541,13 @@ export class MessageRouter {
   private async setNewsSubscriptionFromPlannedAction(
     chatId: number,
     userId: number,
-    rawCategory: string,
+    rawTopic: string,
     hour: number,
     minute: number
   ): Promise<string> {
-    const category = normalizeNewsCategory(rawCategory);
-    if (!category) {
-      const supported = this.newsService.getSupportedCategoriesText();
-      return `Please choose a supported category: ${supported}.`;
+    const topic = rawTopic.trim();
+    if (!topic) {
+      return "Please provide a topic for the news subscription.";
     }
 
     const localNow = DateTime.now().setZone(env.APP_TIMEZONE);
@@ -513,44 +564,93 @@ export class MessageRouter {
     await this.newsSubscriptionsRepo.upsertSubscription({
       chatId,
       userId,
-      category,
+      topicQuery: topic,
       timezone: env.APP_TIMEZONE,
       scheduleHour: hour,
       scheduleMinute: minute,
       nextRunAtUtc: nextRunLocal.toUTC().toISO() ?? new Date().toISOString()
     });
 
+    const saved = await this.newsSubscriptionsRepo.searchSubscriptionsByTopic(chatId, topic, 5);
+    const matching = saved.find(
+      (item) =>
+        item.topicQuery.toLowerCase() === topic.toLowerCase() &&
+        item.scheduleHour === hour &&
+        item.scheduleMinute === minute
+    );
     const scheduleTime = nextRunLocal.toFormat("HH:mm");
-    return `✅ Daily ${category.toUpperCase()} news scheduled at ${scheduleTime} (${env.APP_TIMEZONE}).`;
+    const idSuffix = matching ? ` #${matching.id}` : "";
+    return `✅ Daily news subscription${idSuffix} saved: "${topic}" at ${scheduleTime} (${env.APP_TIMEZONE}).`;
   }
 
   private async showNewsSubscription(chatId: number): Promise<string> {
-    const subscription = await this.newsSubscriptionsRepo.getSubscriptionByChat(chatId);
-    if (!subscription) {
-      return "You don't have a daily news subscription yet.";
+    const subscriptions = await this.newsSubscriptionsRepo.listSubscriptionsByChat(chatId);
+    if (subscriptions.length < 1) {
+      return "You don't have any daily news subscriptions yet.";
     }
 
-    const nextRunLocal = DateTime.fromISO(subscription.nextRunAtUtc, { zone: "utc" }).setZone(
-      subscription.timezone
-    );
-    const formattedNextRun = nextRunLocal.isValid
-      ? nextRunLocal.toFormat("dd/LL/yyyy HH:mm")
-      : "unknown";
+    const lines = subscriptions.map((subscription, index) => {
+      const nextRunLocal = DateTime.fromISO(subscription.nextRunAtUtc, { zone: "utc" }).setZone(
+        subscription.timezone
+      );
+      const formattedNextRun = nextRunLocal.isValid ? nextRunLocal.toFormat("dd/LL/yyyy HH:mm") : "unknown";
+      const scheduledTime = `${String(subscription.scheduleHour).padStart(2, "0")}:${String(
+        subscription.scheduleMinute
+      ).padStart(2, "0")}`;
+      return [
+        `${index + 1}. #${subscription.id} ${subscription.topicQuery}`,
+        `   Time: ${scheduledTime} (${subscription.timezone})`,
+        `   Next run: ${formattedNextRun}`
+      ].join("\n");
+    });
 
-    return [
-      "🗞️ Current daily news schedule",
-      `Category: ${subscription.category.toUpperCase()}`,
-      `Time: ${String(subscription.scheduleHour).padStart(2, "0")}:${String(subscription.scheduleMinute).padStart(2, "0")} (${subscription.timezone})`,
-      `Next run: ${formattedNextRun}`
-    ].join("\n");
+    return ["🗞️ Current daily news subscriptions", "", ...lines].join("\n");
   }
 
-  private async deleteNewsSubscription(chatId: number): Promise<string> {
-    const deleted = await this.newsSubscriptionsRepo.deleteSubscriptionByChat(chatId);
-    if (deleted < 1) {
-      return "You don't have a daily news subscription to remove.";
+  private async deleteNewsSubscription(
+    chatId: number,
+    action: Extract<PlannedAction, { type: "delete_news_subscription" }>
+  ): Promise<string> {
+    if (action.all) {
+      const deletedAll = await this.newsSubscriptionsRepo.deleteSubscriptionByChat(chatId);
+      if (deletedAll < 1) {
+        return "You don't have any daily news subscriptions to remove.";
+      }
+      return `✅ Removed ${deletedAll} daily news subscription(s).`;
     }
-    return "✅ Daily news subscription removed.";
+
+    if (action.id) {
+      const deletedById = await this.newsSubscriptionsRepo.deleteSubscriptionById(chatId, action.id);
+      if (deletedById < 1) {
+        return `I couldn't find a daily news subscription with ID #${action.id}.`;
+      }
+      return `✅ Daily news subscription #${action.id} removed.`;
+    }
+
+    if (action.topic) {
+      const exactDeleted = await this.newsSubscriptionsRepo.deleteSubscriptionByTopic(chatId, action.topic);
+      if (exactDeleted > 0) {
+        return `✅ Removed ${exactDeleted} subscription(s) for "${action.topic}".`;
+      }
+
+      const partialMatches = await this.newsSubscriptionsRepo.searchSubscriptionsByTopic(chatId, action.topic, 5);
+      if (partialMatches.length === 1) {
+        const one = partialMatches[0];
+        await this.newsSubscriptionsRepo.deleteSubscriptionById(chatId, one.id);
+        return `✅ Daily news subscription #${one.id} removed (${one.topicQuery}).`;
+      }
+      if (partialMatches.length > 1) {
+        const options = partialMatches.map((item) => `#${item.id}: ${item.topicQuery}`).join("\n");
+        return [
+          `I found multiple news subscriptions matching "${action.topic}".`,
+          "Please specify which one to remove using its subscription ID.",
+          options
+        ].join("\n");
+      }
+      return `I couldn't find any news subscription matching "${action.topic}".`;
+    }
+
+    return "Please specify which news subscription to remove (ID, topic, or all).";
   }
 
   private logPlannerTelemetry(payload: {

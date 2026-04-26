@@ -5,7 +5,7 @@ interface NewsSubscriptionRow {
   id: number;
   chat_id: number;
   user_id: number;
-  category: string;
+  topic_query: string;
   timezone: string;
   schedule_hour: number;
   schedule_minute: number;
@@ -23,7 +23,7 @@ export class NewsSubscriptionsRepository {
   async upsertSubscription(params: {
     chatId: number;
     userId: number;
-    category: string;
+    topicQuery: string;
     timezone: string;
     scheduleHour: number;
     scheduleMinute: number;
@@ -35,7 +35,7 @@ export class NewsSubscriptionsRepository {
       INSERT INTO news_subscriptions (
         chat_id,
         user_id,
-        category,
+        topic_query,
         timezone,
         schedule_hour,
         schedule_minute,
@@ -47,9 +47,9 @@ export class NewsSubscriptionsRepository {
         updated_at
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, ?, ?)
-      ON CONFLICT(chat_id) DO UPDATE SET
+      ON CONFLICT(chat_id, topic_query, schedule_hour, schedule_minute) DO UPDATE SET
         user_id = excluded.user_id,
-        category = excluded.category,
+        topic_query = excluded.topic_query,
         timezone = excluded.timezone,
         schedule_hour = excluded.schedule_hour,
         schedule_minute = excluded.schedule_minute,
@@ -60,7 +60,7 @@ export class NewsSubscriptionsRepository {
       `,
       params.chatId,
       params.userId,
-      params.category,
+      params.topicQuery,
       params.timezone,
       params.scheduleHour,
       params.scheduleMinute,
@@ -70,16 +70,31 @@ export class NewsSubscriptionsRepository {
     );
   }
 
-  async getSubscriptionByChat(chatId: number): Promise<NewsSubscriptionRecord | null> {
-    const row = await this.db.get<NewsSubscriptionRow>(
+  async listSubscriptionsByChat(chatId: number): Promise<NewsSubscriptionRecord[]> {
+    const rows = await this.db.all<NewsSubscriptionRow[]>(
       `
-      SELECT id, chat_id, user_id, category, timezone, schedule_hour, schedule_minute,
+      SELECT id, chat_id, user_id, topic_query, timezone, schedule_hour, schedule_minute,
              next_run_at_utc, status, last_sent_at_utc, error_message, created_at, updated_at
       FROM news_subscriptions
       WHERE chat_id = ? AND status = 'active'
-      LIMIT 1
+      ORDER BY schedule_hour ASC, schedule_minute ASC, id ASC
       `,
       chatId
+    );
+    return rows.map(mapNewsSubscriptionRow);
+  }
+
+  async getSubscriptionById(chatId: number, id: number): Promise<NewsSubscriptionRecord | null> {
+    const row = await this.db.get<NewsSubscriptionRow>(
+      `
+      SELECT id, chat_id, user_id, topic_query, timezone, schedule_hour, schedule_minute,
+             next_run_at_utc, status, last_sent_at_utc, error_message, created_at, updated_at
+      FROM news_subscriptions
+      WHERE chat_id = ? AND id = ? AND status = 'active'
+      LIMIT 1
+      `,
+      chatId,
+      id
     );
     return row ? mapNewsSubscriptionRow(row) : null;
   }
@@ -87,7 +102,7 @@ export class NewsSubscriptionsRepository {
   async getDueActiveSubscriptions(nowUtcIso: string, limit = 20): Promise<NewsSubscriptionRecord[]> {
     const rows = await this.db.all<NewsSubscriptionRow[]>(
       `
-      SELECT id, chat_id, user_id, category, timezone, schedule_hour, schedule_minute,
+      SELECT id, chat_id, user_id, topic_query, timezone, schedule_hour, schedule_minute,
              next_run_at_utc, status, last_sent_at_utc, error_message, created_at, updated_at
       FROM news_subscriptions
       WHERE status = 'active' AND next_run_at_utc <= ?
@@ -147,6 +162,72 @@ export class NewsSubscriptionsRepository {
     );
     return result.changes ?? 0;
   }
+
+  async deleteSubscriptionById(chatId: number, subscriptionId: number): Promise<number> {
+    const result = await this.db.run(
+      `
+      DELETE FROM news_subscriptions
+      WHERE chat_id = ? AND id = ?
+      `,
+      chatId,
+      subscriptionId
+    );
+    return result.changes ?? 0;
+  }
+
+  async deleteSubscriptionByTopic(chatId: number, topicQuery: string): Promise<number> {
+    const result = await this.db.run(
+      `
+      DELETE FROM news_subscriptions
+      WHERE chat_id = ? AND LOWER(topic_query) = LOWER(?)
+      `,
+      chatId,
+      topicQuery.trim()
+    );
+    return result.changes ?? 0;
+  }
+
+  async searchSubscriptionsByTopic(chatId: number, topicQuery: string, limit = 10): Promise<NewsSubscriptionRecord[]> {
+    const normalized = `%${topicQuery.trim().toLowerCase()}%`;
+    const rows = await this.db.all<NewsSubscriptionRow[]>(
+      `
+      SELECT id, chat_id, user_id, topic_query, timezone, schedule_hour, schedule_minute,
+             next_run_at_utc, status, last_sent_at_utc, error_message, created_at, updated_at
+      FROM news_subscriptions
+      WHERE chat_id = ?
+        AND status = 'active'
+        AND LOWER(topic_query) LIKE ?
+      ORDER BY schedule_hour ASC, schedule_minute ASC, id ASC
+      LIMIT ?
+      `,
+      chatId,
+      normalized,
+      limit
+    );
+    return rows.map(mapNewsSubscriptionRow);
+  }
+
+  async deleteSubscriptionByChatAndSchedule(
+    chatId: number,
+    topicQuery: string,
+    scheduleHour: number,
+    scheduleMinute: number
+  ): Promise<number> {
+    const result = await this.db.run(
+      `
+      DELETE FROM news_subscriptions
+      WHERE chat_id = ?
+        AND LOWER(topic_query) = LOWER(?)
+        AND schedule_hour = ?
+        AND schedule_minute = ?
+      `,
+      chatId,
+      topicQuery.trim(),
+      scheduleHour,
+      scheduleMinute
+    );
+    return result.changes ?? 0;
+  }
 }
 
 function mapNewsSubscriptionRow(row: NewsSubscriptionRow): NewsSubscriptionRecord {
@@ -154,7 +235,7 @@ function mapNewsSubscriptionRow(row: NewsSubscriptionRow): NewsSubscriptionRecor
     id: row.id,
     chatId: row.chat_id,
     userId: row.user_id,
-    category: row.category,
+    topicQuery: row.topic_query,
     timezone: row.timezone,
     scheduleHour: row.schedule_hour,
     scheduleMinute: row.schedule_minute,

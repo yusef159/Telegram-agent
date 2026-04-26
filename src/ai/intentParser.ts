@@ -5,6 +5,7 @@ import type {
   MessageActionPlanNormalizationResult,
   ParsedReminderIntent,
   PlannedAction,
+  PlannedDeleteNewsSubscriptionAction,
   PlannedCreateReminderAction,
   PlannedSetNewsSubscriptionAction
 } from "../types/domain";
@@ -332,22 +333,23 @@ function normalizePlannedAction(
         text: action.text.trim()
       };
     case "fetch_news": {
-      const category = action.category?.trim() || null;
+      const topic = action.topic?.trim() || null;
       const maxItems =
         typeof action.maxItems === "number" && Number.isFinite(action.maxItems)
           ? Math.max(1, Math.min(10, Math.trunc(action.maxItems)))
           : null;
       return {
         ...action,
-        category,
+        topic,
         maxItems
       };
     }
     case "set_news_subscription":
       return normalizeSetNewsSubscriptionAction(action, normalizationErrors, actionIndex);
     case "show_news_subscription":
-    case "delete_news_subscription":
       return action;
+    case "delete_news_subscription":
+      return normalizeDeleteNewsSubscriptionAction(action, normalizationErrors, actionIndex);
     case "list_reminders":
       return {
         ...action,
@@ -499,9 +501,9 @@ function normalizeSetNewsSubscriptionAction(
   normalizationErrors: string[],
   actionIndex: number
 ): PlannedSetNewsSubscriptionAction | null {
-  const category = action.category.trim();
-  if (!category) {
-    normalizationErrors.push(`actions.${actionIndex}.category: News category is required.`);
+  const topic = action.topic.trim();
+  if (!topic) {
+    normalizationErrors.push(`actions.${actionIndex}.topic: News topic is required.`);
     return null;
   }
   if (!Number.isInteger(action.hour) || action.hour < 0 || action.hour > 23) {
@@ -514,6 +516,35 @@ function normalizeSetNewsSubscriptionAction(
   }
   return {
     ...action,
-    category
+    topic
+  };
+}
+
+function normalizeDeleteNewsSubscriptionAction(
+  action: PlannedDeleteNewsSubscriptionAction,
+  normalizationErrors: string[],
+  actionIndex: number
+): PlannedDeleteNewsSubscriptionAction | null {
+  const topic = action.topic?.trim() || null;
+  const id = action.id ?? null;
+  const all = Boolean(action.all);
+
+  if (id !== null && (!Number.isInteger(id) || id <= 0)) {
+    normalizationErrors.push(`actions.${actionIndex}.id: News subscription id must be positive.`);
+    return null;
+  }
+
+  if (!all && id === null && !topic) {
+    normalizationErrors.push(
+      `actions.${actionIndex}: delete_news_subscription requires id, topic, or all=true.`
+    );
+    return null;
+  }
+
+  return {
+    ...action,
+    id,
+    topic,
+    all
   };
 }

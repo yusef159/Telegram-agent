@@ -3,6 +3,7 @@ import { toFile } from "openai/uploads";
 import { z } from "zod";
 
 import { env } from "../config/env";
+import type { WebSearchResult } from "../news/webSearchClient";
 import type {
   ChatMessage,
   MessageActionPlan,
@@ -95,7 +96,7 @@ const plannedAnswerUserActionSchema = z
 const plannedFetchNewsActionSchema = z
   .object({
     type: z.literal("fetch_news"),
-    category: z.string().nullable().optional(),
+    topic: z.string().nullable().optional(),
     maxItems: z.number().int().min(1).max(10).nullable().optional()
   })
   .strict();
@@ -103,7 +104,7 @@ const plannedFetchNewsActionSchema = z
 const plannedSetNewsSubscriptionActionSchema = z
   .object({
     type: z.literal("set_news_subscription"),
-    category: z.string().min(1),
+    topic: z.string().min(1),
     hour: z.number().int().min(0).max(23),
     minute: z.number().int().min(0).max(59)
   })
@@ -117,7 +118,10 @@ const plannedShowNewsSubscriptionActionSchema = z
 
 const plannedDeleteNewsSubscriptionActionSchema = z
   .object({
-    type: z.literal("delete_news_subscription")
+    type: z.literal("delete_news_subscription"),
+    id: z.number().int().positive().nullable().optional(),
+    topic: z.string().nullable().optional(),
+    all: z.boolean().nullable().optional()
   })
   .strict();
 
@@ -638,6 +642,55 @@ export class OpenAiClient {
     };
   }
 
+  async summarizeNewsSearchResults(params: {
+    topic: string;
+    results: WebSearchResult[];
+  }): Promise<string> {
+    const compactPayload = params.results.slice(0, 8).map((item) => ({
+      title: item.title,
+      source: item.source,
+      publishedAt: item.publishedAt,
+      snippet: item.snippet
+    }));
+
+    const completion = await this.runWithTimeout(() =>
+      this.client.chat.completions.create({
+        model: env.OPENAI_MODEL,
+        temperature: 0.2,
+        max_tokens: 380,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Summarize search findings into a concise daily briefing.",
+              "Use only the provided results.",
+              "Output plain text with 3-5 bullet points.",
+              "Each bullet should include one concrete fact and why it matters.",
+              "Do not include markdown headings."
+            ].join(" ")
+          },
+          {
+            role: "user",
+            content: [
+              `Topic: ${params.topic}`,
+              `SearchResults: ${JSON.stringify(compactPayload)}`
+            ].join("\n")
+          }
+        ]
+      })
+    );
+
+    const response = completion.choices[0]?.message?.content?.trim();
+    if (response) {
+      return response;
+    }
+
+    return compactPayload
+      .slice(0, 3)
+      .map((item) => `- ${item.title} (${item.source})`)
+      .join("\n");
+  }
+
   async planMessageActions(params: {
     userMessage: string;
     nowIsoInTimezone: string;
@@ -659,9 +712,10 @@ export class OpenAiClient {
               "Allowed types: create_reminder, create_task, answer_user, fetch_news, set_news_subscription, show_news_subscription, delete_news_subscription, list_reminders, list_tasks, delete_reminder, delete_task, adjust_reminder, ask_clarification.",
               "Chat/general questions => one answer_user action.",
               "create_reminder needs message + dueAtIso (ISO with offset); weekly recurrence: {kind:'weekly', weekdays:[1..7], hour, minute}.",
-              "fetch_news optionally includes category and maxItems.",
-              "set_news_subscription requires category + hour + minute in 24h local time.",
-              "show_news_subscription and delete_news_subscription take no extra fields.",
+              "fetch_news optionally includes topic and maxItems.",
+              "set_news_subscription requires topic + hour + minute in 24h local time.",
+              "show_news_subscription takes no extra fields.",
+              "delete_news_subscription can include id OR topic OR all=true.",
               "delete_* uses mode single|ids|count|all; use queryText for text match, listPosition for numbered list.",
               "If ambiguous, set needsClarification=true and include ask_clarification.",
               `Timezone: ${params.timezone}.`,

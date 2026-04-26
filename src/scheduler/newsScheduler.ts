@@ -47,7 +47,7 @@ export class NewsScheduler {
       for (const subscription of dueSubscriptions) {
         try {
           const digest = await this.newsService.buildDigest({
-            category: subscription.category,
+            topic: subscription.topicQuery,
             maxItems: env.NEWS_MAX_ITEMS
           });
 

@@ -11,6 +11,7 @@ export class TelegramBotService {
     { command: "reminders", description: "Show pending reminders" },
     { command: "tasks", description: "Show pending tasks" },
     { command: "all", description: "Show reminders and tasks" },
+    { command: "news", description: "Show your news subscriptions" },
     { command: "help", description: "Show available commands" }
   ];
 
@@ -29,8 +30,13 @@ export class TelegramBotService {
       );
     });
 
-    this.bot.on("text", async (ctx) => {
+    this.bot.on("text", async (ctx, next) => {
       const incomingText = ctx.message.text ?? "";
+      // Let explicit slash commands flow to command handlers.
+      if (incomingText.trim().startsWith("/")) {
+        await next();
+        return;
+      }
       try {
         const reply = await this.messageRouter.routeTextMessage({
           chatId: ctx.chat.id,
@@ -81,6 +87,10 @@ export class TelegramBotService {
       await this.handleShortcutCommand(ctx.chat.id, "all");
     });
 
+    this.bot.command("news", async (ctx) => {
+      await this.handleNewsSubscriptionCommand(ctx.chat.id);
+    });
+
     this.bot.command("help", async (ctx) => {
       const helpText = [
         "Available commands:",
@@ -88,7 +98,14 @@ export class TelegramBotService {
         "/remiders - Same as reminders",
         "/tasks - Show pending tasks",
         "/all - Show reminders and tasks",
-        "/help - Show this help"
+        "/news - Show your current news subscriptions",
+        '/help - Show this help',
+        "",
+        "News examples:",
+        '• "Provide me news about OpenAI every morning at 9 am"',
+        '• "Show my news subscriptions"',
+        '• "Cancel news subscription #3"',
+        '• "Cancel all news subscriptions"'
       ].join("\n");
       await this.safeReply(ctx.chat.id, helpText);
     });
@@ -201,13 +218,26 @@ export class TelegramBotService {
 
   private async handleShortcutCommand(
     chatId: number,
-    command: "reminders" | "tasks" | "all"
+    command: "reminders" | "tasks" | "all" | "news"
   ): Promise<void> {
     try {
       const reply = await this.messageRouter.handleShortcutCommand({ chatId, command });
       await this.safeReply(chatId, reply);
     } catch (error) {
       console.error("Failed to handle shortcut command:", error);
+      await this.safeReply(chatId, "I couldn't process that command right now. Please try again.");
+    }
+  }
+
+  private async handleNewsSubscriptionCommand(chatId: number): Promise<void> {
+    try {
+      const reply = await this.messageRouter.handleShortcutCommand({
+        chatId,
+        command: "news"
+      });
+      await this.safeReply(chatId, reply);
+    } catch (error) {
+      console.error("Failed to handle news command:", error);
       await this.safeReply(chatId, "I couldn't process that command right now. Please try again.");
     }
   }
