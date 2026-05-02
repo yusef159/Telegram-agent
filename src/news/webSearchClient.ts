@@ -23,11 +23,29 @@ export class WebSearchClient {
     if (!query) {
       return [];
     }
-    if (!env.WEB_SEARCH_API_KEY.trim()) {
-      throw new Error("WEB_SEARCH_API_KEY is missing.");
+    const maxResults = normalizeMaxResults(params.maxResults);
+    const apiKey = env.WEB_SEARCH_API_KEY.trim();
+    if (!apiKey) {
+      return this.searchWithGoogleNewsRss(query, maxResults);
     }
 
-    const maxResults = normalizeMaxResults(params.maxResults);
+    try {
+      const primaryResults = await this.searchWithExternalApi(query, maxResults, apiKey);
+      if (primaryResults.length > 0) {
+        return primaryResults;
+      }
+    } catch (error) {
+      console.warn("primary_web_search_failed", error);
+    }
+
+    return this.searchWithGoogleNewsRss(query, maxResults);
+  }
+
+  private async searchWithExternalApi(
+    query: string,
+    maxResults: number,
+    apiKey: string
+  ): Promise<WebSearchResult[]> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
       controller.abort();
@@ -41,7 +59,7 @@ export class WebSearchClient {
         },
         signal: controller.signal,
         body: JSON.stringify({
-          api_key: env.WEB_SEARCH_API_KEY,
+          api_key: apiKey,
           query,
           max_results: maxResults,
           search_depth: "basic",
@@ -67,6 +85,35 @@ export class WebSearchClient {
         }))
         .filter((item) => item.title && item.url)
         .slice(0, maxResults);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  private async searchWithGoogleNewsRss(
+    query: string,
+    maxResults: number
+  ): Promise<WebSearchResult[]> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, env.NEWS_FETCH_TIMEOUT_MS);
+
+    try {
+      const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "telgram-agent-news-fetcher/1.0",
+          Accept: "application/rss+xml, application/xml, text/xml"
+        }
+      });
+      if (!response.ok) {
+        throw new Error(`Google News RSS failed with status ${response.status}.`);
+      }
+      const xml = await response.text();
+      const items = parseGoogleNewsRss(xml);
+      return items.slice(0, maxResults);
     } finally {
       clearTimeout(timeoutId);
     }
@@ -104,4 +151,52 @@ function extractSource(url: string): string {
   } catch {
     return "web";
   }
+}
+
+function parseGoogleNewsRss(xml: string): WebSearchResult[] {
+  const itemPattern = /<item\b[^>]*>([\s\S]*?)<\/item>/gi;
+  const results: WebSearchResult[] = [];
+  let match = itemPattern.exec(xml);
+  while (match) {
+    const block = match[1] ?? "";
+    const title = decodeXml(stripCdata(extractTagValue(block, "title"))).trim();
+    const url = decodeXml(stripCdata(extractTagValue(block, "link"))).trim();
+    const publishedAt = decodeXml(stripCdata(extractTagValue(block, "pubDate"))).trim() || null;
+    const description = decodeXml(stripCdata(extractTagValue(block, "description"))).trim();
+    const snippet = normalizeSnippet(stripHtml(description));
+    if (title && url) {
+      results.push({
+        title,
+        url,
+        snippet,
+        publishedAt,
+        source: extractSource(url)
+      });
+    }
+    match = itemPattern.exec(xml);
+  }
+  return results;
+}
+
+function extractTagValue(xmlChunk: string, tagName: string): string {
+  const pattern = new RegExp(`<${tagName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tagName}>`, "i");
+  const match = xmlChunk.match(pattern);
+  return match?.[1] ?? "";
+}
+
+function stripCdata(text: string): string {
+  return text.replace(/^<!\[CDATA\[/, "").replace(/\]\]>$/, "");
+}
+
+function stripHtml(value: string): string {
+  return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function decodeXml(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
 }

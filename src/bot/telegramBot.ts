@@ -1,4 +1,4 @@
-import { Telegraf } from "telegraf";
+import { Markup, Telegraf } from "telegraf";
 
 import { env } from "../config/env";
 import { OpenAiClient } from "../ai/openaiClient";
@@ -6,12 +6,20 @@ import { MessageRouter } from "./messageRouter";
 
 export class TelegramBotService {
   private readonly bot: Telegraf;
+  private static readonly SPORTS_CALLBACK_BUILD_TODAY_WORKOUT = "sports:build_today_workout";
+  private static readonly SPORTS_CALLBACK_BUILD_WORKOUT = "sports:build_workout";
+  private static readonly SPORTS_CALLBACK_NEW_WORKOUT = "sports:new_workout";
+  private static readonly SPORTS_CALLBACK_UPDATE_INSTRUCTIONS = "sports:update_instructions";
+  private static readonly SPORTS_CALLBACK_SHOW_INSTRUCTIONS = "sports:show_instructions";
   private static readonly COMMANDS: Array<{ command: string; description: string }> = [
     { command: "start", description: "Show welcome message" },
     { command: "reminders", description: "Show pending reminders" },
     { command: "tasks", description: "Show pending tasks" },
     { command: "all", description: "Show reminders and tasks" },
     { command: "news", description: "Show your news subscriptions" },
+    { command: "newsnow", description: "Get subscribed news right away" },
+    { command: "sports", description: "Start sports mode and get workouts" },
+    { command: "startsport", description: "Alias for sports mode" },
     { command: "help", description: "Show available commands" }
   ];
 
@@ -91,6 +99,76 @@ export class TelegramBotService {
       await this.handleNewsSubscriptionCommand(ctx.chat.id);
     });
 
+    this.bot.command("newsnow", async (ctx) => {
+      await this.handleNewsNowCommand(ctx.chat.id);
+    });
+
+    this.bot.command("sports", async (ctx) => {
+      await this.handleSportsStartCommand(ctx.chat.id);
+    });
+
+    this.bot.command("startsport", async (ctx) => {
+      await this.handleSportsStartCommand(ctx.chat.id);
+    });
+
+    this.bot.action(TelegramBotService.SPORTS_CALLBACK_NEW_WORKOUT, async (ctx) => {
+      const chatId = extractCallbackChatId(ctx);
+      if (!chatId) {
+        await ctx.answerCbQuery("Couldn't identify this chat.");
+        return;
+      }
+      await ctx.answerCbQuery("Send your workout prompt.");
+      const reply = this.messageRouter.beginSportsWorkoutPrompt(chatId);
+      await this.safeReply(chatId, reply);
+    });
+
+    this.bot.action(TelegramBotService.SPORTS_CALLBACK_BUILD_WORKOUT, async (ctx) => {
+      const chatId = extractCallbackChatId(ctx);
+      if (!chatId) {
+        await ctx.answerCbQuery("Couldn't identify this chat.");
+        return;
+      }
+      await ctx.answerCbQuery("Building workout...");
+      const reply = await this.messageRouter.buildSportsWorkout(chatId);
+      await this.safeReply(chatId, reply);
+      await this.sendSportsMenu(chatId, "Sports menu:");
+    });
+
+    this.bot.action(TelegramBotService.SPORTS_CALLBACK_BUILD_TODAY_WORKOUT, async (ctx) => {
+      const chatId = extractCallbackChatId(ctx);
+      if (!chatId) {
+        await ctx.answerCbQuery("Couldn't identify this chat.");
+        return;
+      }
+      await ctx.answerCbQuery("Building today's workout...");
+      const reply = await this.messageRouter.buildSportsWorkoutForToday(chatId);
+      await this.safeReply(chatId, reply);
+      await this.sendSportsMenu(chatId, "Sports menu:");
+    });
+
+    this.bot.action(TelegramBotService.SPORTS_CALLBACK_UPDATE_INSTRUCTIONS, async (ctx) => {
+      const chatId = extractCallbackChatId(ctx);
+      if (!chatId) {
+        await ctx.answerCbQuery("Couldn't identify this chat.");
+        return;
+      }
+      await ctx.answerCbQuery("Send updated instructions.");
+      const reply = this.messageRouter.beginSportsInstructionsUpdate(chatId);
+      await this.safeReply(chatId, reply);
+    });
+
+    this.bot.action(TelegramBotService.SPORTS_CALLBACK_SHOW_INSTRUCTIONS, async (ctx) => {
+      const chatId = extractCallbackChatId(ctx);
+      if (!chatId) {
+        await ctx.answerCbQuery("Couldn't identify this chat.");
+        return;
+      }
+      await ctx.answerCbQuery("Showing saved instructions.");
+      const reply = this.messageRouter.showSportsInstructions(chatId);
+      await this.safeReply(chatId, reply);
+      await this.sendSportsMenu(chatId, "Sports menu:");
+    });
+
     this.bot.command("help", async (ctx) => {
       const helpText = [
         "Available commands:",
@@ -99,13 +177,23 @@ export class TelegramBotService {
         "/tasks - Show pending tasks",
         "/all - Show reminders and tasks",
         "/news - Show your current news subscriptions",
+        "/newsnow - Fetch your subscribed news right away",
+        "/sports - Start sports mode and set workout instructions",
+        "/startsport - Alias for sports mode",
         '/help - Show this help',
         "",
         "News examples:",
         '• "Provide me news about OpenAI every morning at 9 am"',
         '• "Show my news subscriptions"',
         '• "Cancel news subscription #3"',
-        '• "Cancel all news subscriptions"'
+        '• "Cancel all news subscriptions"',
+        "",
+        "Sports examples:",
+        '• "/sports"',
+        '• "Build today\'s workout"',
+        '• "sports update: 4 workouts/week, 45 minutes, focus on full body"',
+        '• "new workout for this week, focus more on legs"',
+        '• "sports: create a recovery workout session for today"'
       ].join("\n");
       await this.safeReply(ctx.chat.id, helpText);
     });
@@ -241,6 +329,68 @@ export class TelegramBotService {
       await this.safeReply(chatId, "I couldn't process that command right now. Please try again.");
     }
   }
+
+  private async handleNewsNowCommand(chatId: number): Promise<void> {
+    try {
+      const reply = await this.messageRouter.handleShortcutCommand({
+        chatId,
+        command: "news_now"
+      });
+      await this.safeReply(chatId, reply);
+    } catch (error) {
+      console.error("Failed to handle newsnow command:", error);
+      await this.safeReply(chatId, "I couldn't fetch your news right now. Please try again.");
+    }
+  }
+
+  private async handleSportsStartCommand(chatId: number): Promise<void> {
+    try {
+      const reply = await this.messageRouter.handleShortcutCommand({
+        chatId,
+        command: "sports_start"
+      });
+      await this.sendSportsMenu(chatId, reply);
+    } catch (error) {
+      console.error("Failed to handle sports command:", error);
+      await this.safeReply(chatId, "I couldn't start sports mode right now. Please try again.");
+    }
+  }
+
+  private async sendSportsMenu(chatId: number, message: string): Promise<void> {
+    try {
+      await this.bot.telegram.sendMessage(
+        chatId,
+        message,
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback("Build workout", TelegramBotService.SPORTS_CALLBACK_BUILD_WORKOUT),
+            Markup.button.callback(
+              "Build today's workout",
+              TelegramBotService.SPORTS_CALLBACK_BUILD_TODAY_WORKOUT
+            )
+          ],
+          [
+            Markup.button.callback("New workout", TelegramBotService.SPORTS_CALLBACK_NEW_WORKOUT),
+          ],
+          [
+            Markup.button.callback(
+              "Update instructions",
+              TelegramBotService.SPORTS_CALLBACK_UPDATE_INSTRUCTIONS
+            )
+          ],
+          [
+            Markup.button.callback(
+              "Show instructions",
+              TelegramBotService.SPORTS_CALLBACK_SHOW_INSTRUCTIONS
+            )
+          ]
+        ])
+      );
+    } catch (error) {
+      console.error("Failed to send sports menu:", error);
+      await this.safeReply(chatId, message);
+    }
+  }
 }
 
 function extractQuotedMessageText(message: unknown): string | undefined {
@@ -252,4 +402,11 @@ function extractQuotedMessageText(message: unknown): string | undefined {
   }
 
   return quoted.text ?? quoted.caption ?? undefined;
+}
+
+function extractCallbackChatId(ctx: {
+  callbackQuery?: unknown;
+}): number | null {
+  const callback = ctx.callbackQuery as { message?: { chat?: { id?: number } } } | undefined;
+  return callback?.message?.chat?.id ?? null;
 }

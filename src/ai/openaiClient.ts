@@ -119,11 +119,22 @@ const plannedShowNewsSubscriptionActionSchema = z
 const plannedDeleteNewsSubscriptionActionSchema = z
   .object({
     type: z.literal("delete_news_subscription"),
-    id: z.number().int().positive().nullable().optional(),
+    id: z
+      .preprocess((value) => {
+        if (typeof value === "string") {
+          const normalized = value.trim();
+          if (/^\d+$/.test(normalized)) {
+            return Number.parseInt(normalized, 10);
+          }
+        }
+        return value;
+      }, z.number().int().positive())
+      .nullable()
+      .optional(),
     topic: z.string().nullable().optional(),
     all: z.boolean().nullable().optional()
   })
-  .strict();
+  .passthrough();
 
 const plannedListRemindersActionSchema = z
   .object({
@@ -689,6 +700,71 @@ export class OpenAiClient {
       .slice(0, 3)
       .map((item) => `- ${item.title} (${item.source})`)
       .join("\n");
+  }
+
+  async generateWorkoutPlan(params: {
+    userPrompt: string;
+    savedInstructions?: string;
+    planMode?: "weekly" | "daily";
+  }): Promise<string> {
+    const savedInstructions =
+      params.savedInstructions && params.savedInstructions.trim().length > 0
+        ? params.savedInstructions.trim()
+        : null;
+    const planMode = params.planMode ?? "weekly";
+    const structureInstructions =
+      planMode === "daily"
+        ? [
+            "Use this exact output structure and keep numbering clear:",
+            "1) Today's plan overview (goal, duration, equipment, target muscles).",
+            "2) Warm-up (ordered steps with timing).",
+            "3) Main workout (exercise order, sets, reps/time, rest).",
+            "4) Cool-down (ordered steps with timing).",
+            "5) Progression tip for the next session and brief safety notes.",
+            "This is for today only: do NOT include a weekly schedule."
+          ]
+        : [
+            "Use this exact output structure and keep numbering clear:",
+            "1) Plan overview (goal, sessions/week, session duration, split).",
+            "2) Weekly schedule table-like list by day.",
+            "3) Detailed session breakdown with exercise order, sets, reps/time, and rest.",
+            "4) Progression tips for next week.",
+            "5) Brief safety notes."
+          ];
+
+    const completion = await this.runWithTimeout(() =>
+      this.client.chat.completions.create({
+        model: env.OPENAI_MODEL,
+        temperature: 0.6,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "You are a certified fitness coach assistant in Telegram.",
+              "Create safe, structured workout plans based on user goals and constraints.",
+              "Return plain text only.",
+              "Do not use markdown syntax (no #, **, __, *, -, or backticks for formatting).",
+              ...structureInstructions,
+              "If user input is missing key info, make reasonable assumptions and state them clearly.",
+              "Keep plans practical and concise.",
+              "Avoid medical claims."
+            ].join(" ")
+          },
+          {
+            role: "user",
+            content: [
+              `SavedInstructions: ${savedInstructions ?? "none"}`,
+              `SessionRequest: ${params.userPrompt.trim()}`
+            ].join("\n")
+          }
+        ]
+      })
+    );
+
+    return (
+      completion.choices[0]?.message?.content?.trim() ||
+      "I couldn't generate a workout plan right now. Please try again."
+    );
   }
 
   async planMessageActions(params: {

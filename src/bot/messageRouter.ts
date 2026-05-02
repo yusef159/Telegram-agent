@@ -27,6 +27,9 @@ export class MessageRouter {
   private static readonly recentPlanFingerprints = new Map<string, number>();
   private static readonly recentReminderListByChat = new Map<number, { ids: number[]; createdAt: number }>();
   private static readonly recentTaskListByChat = new Map<number, { ids: number[]; createdAt: number }>();
+  private static readonly sportsInstructionByChat = new Map<number, string>();
+  private static readonly awaitingSportsInstructionsByChat = new Set<number>();
+  private static readonly awaitingSportsWorkoutPromptByChat = new Set<number>();
   private static readonly LIST_CONTEXT_TTL_MS = 30 * 60 * 1000;
 
   constructor(
@@ -49,6 +52,11 @@ export class MessageRouter {
     const trimmedText = params.text.trim();
     if (!trimmedText) {
       return "Please send a message.";
+    }
+
+    const sportsReply = await this.tryHandleSportsMessage(params.chatId, trimmedText);
+    if (sportsReply) {
+      return sportsReply;
     }
 
     const deterministicNewsReply = await this.tryHandleDeterministicNewsCommands(params.chatId, trimmedText);
@@ -143,6 +151,14 @@ export class MessageRouter {
       return this.showNewsSubscription(chatId);
     }
 
+    if (
+      lower === "/newsnow" ||
+      lower.startsWith("/newsnow@") ||
+      /\b(send|get|show)\b.*\b(news)\b.*\b(now|right away|right now)\b/i.test(normalized)
+    ) {
+      return this.sendSubscribedNewsNow(chatId);
+    }
+
     if (/\b(cancel|delete|remove)\b.*\b(all)\b.*\b(news subscriptions?)\b/i.test(normalized)) {
       return this.deleteNewsSubscription(chatId, {
         type: "delete_news_subscription",
@@ -151,7 +167,7 @@ export class MessageRouter {
     }
 
     const idMatch = normalized.match(
-      /\b(?:cancel|delete|remove)\b.*\bnews subscription\b.*#(\d+)\b/i
+      /(?=.*\b(?:cancel|delete|remove)\b)(?=.*\bnews\b)(?=.*\bsubscription\b).*#?(\d+)\b/i
     );
     if (idMatch) {
       const id = Number.parseInt(idMatch[1], 10);
@@ -181,7 +197,7 @@ export class MessageRouter {
 
   async handleShortcutCommand(params: {
     chatId: number;
-    command: "reminders" | "tasks" | "all" | "news";
+    command: "reminders" | "tasks" | "all" | "news" | "news_now" | "sports_start";
   }): Promise<string> {
     switch (params.command) {
       case "reminders":
@@ -192,9 +208,241 @@ export class MessageRouter {
         return this.getAllPendingInfo(params.chatId);
       case "news":
         return this.showNewsSubscription(params.chatId);
+      case "news_now":
+        return this.sendSubscribedNewsNow(params.chatId);
+      case "sports_start":
+        return this.startSportsFlow(params.chatId);
       default:
         return "Unsupported shortcut command.";
     }
+  }
+
+  private startSportsFlow(chatId: number): string {
+    const saved = MessageRouter.sportsInstructionByChat.get(chatId);
+    if (saved) {
+      MessageRouter.awaitingSportsInstructionsByChat.delete(chatId);
+      return [
+        "Sports mode started.",
+        "Choose an option from the sports menu below.",
+        "",
+        `Current saved instructions: ${saved}`,
+        "",
+        "You can update instructions any time with: sports update: <your instructions>"
+      ].join("\n");
+    }
+
+    MessageRouter.awaitingSportsInstructionsByChat.add(chatId);
+    return [
+      "Sports mode started.",
+      "Please send your workout instructions first.",
+      "Include details like sessions per week, session duration, equipment, level, and target muscles.",
+      "",
+      'Example: "4 workouts/week, 45 minutes each, beginner, home dumbbells, focus on full body and core."'
+    ].join("\n");
+  }
+
+  beginSportsInstructionsUpdate(chatId: number): string {
+    MessageRouter.awaitingSportsInstructionsByChat.add(chatId);
+    MessageRouter.awaitingSportsWorkoutPromptByChat.delete(chatId);
+    const saved = MessageRouter.sportsInstructionByChat.get(chatId);
+    if (!saved) {
+      return [
+        "Please send your workout instructions.",
+        "Include sessions/week, duration, level, available equipment, and target muscles."
+      ].join("\n");
+    }
+    return [
+      "Send your updated workout instructions now.",
+      `Current saved instructions: ${saved}`
+    ].join("\n");
+  }
+
+  showSportsInstructions(chatId: number): string {
+    const saved = MessageRouter.sportsInstructionByChat.get(chatId);
+    if (!saved) {
+      return [
+        "No sports instructions saved yet.",
+        "Use the sports menu and choose \"Update instructions\" first."
+      ].join("\n");
+    }
+    return [`Your current sports instructions:`, saved].join("\n");
+  }
+
+  beginSportsWorkoutPrompt(chatId: number): string {
+    const saved = MessageRouter.sportsInstructionByChat.get(chatId);
+    MessageRouter.awaitingSportsInstructionsByChat.delete(chatId);
+    if (!saved) {
+      MessageRouter.awaitingSportsInstructionsByChat.add(chatId);
+      return [
+        "I don't have your sports instructions yet.",
+        "Please send them first, then request a workout."
+      ].join("\n");
+    }
+    MessageRouter.awaitingSportsWorkoutPromptByChat.add(chatId);
+    return [
+      "Send your workout prompt now.",
+      'Example: "Create this week\'s workout with extra focus on legs and core."'
+    ].join("\n");
+  }
+
+  async buildSportsWorkout(chatId: number): Promise<string> {
+    const saved = MessageRouter.sportsInstructionByChat.get(chatId);
+    if (!saved) {
+      MessageRouter.awaitingSportsInstructionsByChat.add(chatId);
+      return [
+        "I don't have your sports instructions yet.",
+        "Please send your instructions first, then build a workout."
+      ].join("\n");
+    }
+
+    MessageRouter.awaitingSportsInstructionsByChat.delete(chatId);
+    MessageRouter.awaitingSportsWorkoutPromptByChat.delete(chatId);
+    const sessionPrompt = [
+      "Build a new workout for me now.",
+      "Make this plan different from the previous one while still following my saved instructions.",
+      `Session marker: ${new Date().toISOString()}`
+    ].join(" ");
+    return this.generateSportsWorkout(chatId, sessionPrompt, "weekly");
+  }
+
+  async buildSportsWorkoutForToday(chatId: number): Promise<string> {
+    const saved = MessageRouter.sportsInstructionByChat.get(chatId);
+    if (!saved) {
+      MessageRouter.awaitingSportsInstructionsByChat.add(chatId);
+      return [
+        "I don't have your sports instructions yet.",
+        "Please send your instructions first, then build today's workout."
+      ].join("\n");
+    }
+
+    MessageRouter.awaitingSportsInstructionsByChat.delete(chatId);
+    MessageRouter.awaitingSportsWorkoutPromptByChat.delete(chatId);
+    const dailyPrompt = [
+      "Build today's workout only.",
+      "This should be one session for today and not a weekly plan.",
+      "Make it a new variation while following my saved instructions.",
+      `Session marker: ${new Date().toISOString()}`
+    ].join(" ");
+    return this.generateSportsWorkout(chatId, dailyPrompt, "daily");
+  }
+
+  private async tryHandleSportsMessage(chatId: number, text: string): Promise<string | null> {
+    const normalized = text.trim();
+    const lower = normalized.toLowerCase();
+
+    if (lower === "/sports" || lower.startsWith("/sports@") || lower === "/startsport" || lower.startsWith("/startsport@")) {
+      return this.startSportsFlow(chatId);
+    }
+
+    const updateMatch = normalized.match(/^(?:sports\s+)?(?:update|set|save)\s+(?:sports\s+)?instructions?\s*[:\-]?\s*(.+)$/i);
+    if (updateMatch) {
+      const nextInstructions = updateMatch[1]?.trim();
+      if (!nextInstructions) {
+        return "Please include the new instructions after the update command.";
+      }
+      MessageRouter.sportsInstructionByChat.set(chatId, nextInstructions);
+      MessageRouter.awaitingSportsInstructionsByChat.delete(chatId);
+      return [
+        "Updated your sports instructions.",
+        `Saved: ${nextInstructions}`,
+        "",
+        'Ask for a workout anytime, for example: "new workout for this week".'
+      ].join("\n");
+    }
+
+    if (MessageRouter.awaitingSportsInstructionsByChat.has(chatId)) {
+      const initialInstructions = normalized;
+      MessageRouter.sportsInstructionByChat.set(chatId, initialInstructions);
+      MessageRouter.awaitingSportsInstructionsByChat.delete(chatId);
+      MessageRouter.awaitingSportsWorkoutPromptByChat.delete(chatId);
+      return [
+        "Great, I saved your workout instructions.",
+        "Now send any workout request to get a structured plan.",
+        "",
+        'Example: "new workout session focusing on upper body strength".'
+      ].join("\n");
+    }
+
+    if (MessageRouter.awaitingSportsWorkoutPromptByChat.has(chatId)) {
+      MessageRouter.awaitingSportsWorkoutPromptByChat.delete(chatId);
+      return this.generateSportsWorkout(chatId, normalized, "weekly");
+    }
+
+    const hasSavedInstructions = MessageRouter.sportsInstructionByChat.has(chatId);
+    const explicitWorkoutIntent =
+      /\b(new|another|generate|create|build)\b.*\b(workout|training|program|plan)\b/i.test(normalized) ||
+      /\b(workout|training)\b.*\b(for|today|this week|session)\b/i.test(normalized);
+    const explicitSportsPrefix = /^sports\s*[:\-]/i.test(normalized);
+    if (!hasSavedInstructions && !explicitSportsPrefix && !explicitWorkoutIntent) {
+      return null;
+    }
+
+    if (!hasSavedInstructions) {
+      MessageRouter.awaitingSportsInstructionsByChat.add(chatId);
+      return [
+        "I don't have your sports instructions yet.",
+        "Send them first so I can personalize your plan.",
+        'Example: "3 workouts/week, 30 minutes, intermediate, focus on chest and back, gym equipment."'
+      ].join("\n");
+    }
+
+    const workoutPrompt = explicitSportsPrefix ? normalized.replace(/^sports\s*[:\-]\s*/i, "").trim() : normalized;
+    if (!workoutPrompt) {
+      return 'Send your workout request after "sports:".';
+    }
+
+    return this.generateSportsWorkout(chatId, workoutPrompt, "weekly");
+  }
+
+  private async generateSportsWorkout(
+    chatId: number,
+    workoutPrompt: string,
+    planMode: "weekly" | "daily"
+  ): Promise<string> {
+    try {
+      const generatedWorkout = await this.openAiClient.generateWorkoutPlan({
+        userPrompt: workoutPrompt,
+        savedInstructions: MessageRouter.sportsInstructionByChat.get(chatId),
+        planMode
+      });
+      return formatWorkoutForTelegram(generatedWorkout);
+    } catch (error) {
+      console.error("Failed to generate sports workout:", error);
+      return "I couldn't generate your workout right now. Please try again in a moment.";
+    }
+  }
+
+  private async sendSubscribedNewsNow(chatId: number): Promise<string> {
+    const subscriptions = await this.newsSubscriptionsRepo.listSubscriptionsByChat(chatId);
+    if (subscriptions.length < 1) {
+      return "You don't have any active news subscriptions yet. Ask me to subscribe you first.";
+    }
+
+    const digests: string[] = [];
+    const failures: string[] = [];
+    for (const subscription of subscriptions.slice(0, 5)) {
+      try {
+        const digest = await this.newsService.buildDigest({
+          topic: subscription.topicQuery,
+          maxItems: env.NEWS_MAX_ITEMS
+        });
+        digests.push(`Subscription #${subscription.id} (${subscription.topicQuery})\n${digest}`);
+      } catch {
+        failures.push(`#${subscription.id} (${subscription.topicQuery})`);
+      }
+    }
+
+    if (digests.length < 1) {
+      return "I couldn't fetch your subscribed news right now. Please try again in a minute.";
+    }
+
+    if (failures.length > 0) {
+      digests.push(
+        "",
+        `Some subscriptions failed just now: ${failures.join(", ")}. Try again shortly.`
+      );
+    }
+    return digests.join("\n\n--------------------\n\n");
   }
 
   private async routeTextMessageLegacy(
@@ -1589,4 +1837,39 @@ function formatLocalDueWithEmoji(localDue: string): string {
     return `📅 ${localDue}`;
   }
   return `📅 ${datePart} ⏰ ${timePart}`;
+}
+
+function formatWorkoutForTelegram(rawWorkout: string): string {
+  const cleanedLines = rawWorkout
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => sanitizeWorkoutLine(line))
+    .filter((line) => line.length > 0);
+
+  if (cleanedLines.length === 0) {
+    return rawWorkout;
+  }
+
+  const normalizedLines: string[] = [];
+  for (const line of cleanedLines) {
+    if (/^\d+\)\s*/.test(line)) {
+      normalizedLines.push("", line);
+      continue;
+    }
+    normalizedLines.push(line);
+  }
+
+  const compact = normalizedLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (compact.length <= 3900) {
+    return compact;
+  }
+  return `${compact.slice(0, 3880).trim()}\n\n... (truncated for Telegram length)`;
+}
+
+function sanitizeWorkoutLine(line: string): string {
+  const withoutHeadingPrefix = line.replace(/^#{1,6}\s*/, "");
+  const withoutBold = withoutHeadingPrefix.replace(/\*\*(.*?)\*\*/g, "$1").replace(/__(.*?)__/g, "$1");
+  const withoutInlineCode = withoutBold.replace(/`([^`]+)`/g, "$1");
+  const bulletNormalized = withoutInlineCode.replace(/^\s*[-*]\s+/, "• ");
+  return bulletNormalized.replace(/\s+/g, " ").trim();
 }
